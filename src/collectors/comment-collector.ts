@@ -54,7 +54,8 @@
 
 import { httpGet } from '@utils/http';
 import { logger } from '@utils/logger';
-import { commentRepo, videoRepo } from '@repositories/index';
+import { commentRepo } from '@repositories/index';
+import { ensureVideoByBvid } from '@services/video-bootstrap';
 import type { Collector, CollectorInput, CollectorResult, CollectorStats, CollectorDiagnostics } from './types';
 import type { Comment } from '@models/comment';
 import {
@@ -148,10 +149,26 @@ export class CommentCollector implements Collector<Comment> {
     opts: CommentCollectOptions = {},
     signal?: AbortSignal,
   ): Promise<CollectorResult<Comment>> {
-    const video = await videoRepo.findByBvid(bvid);
-    if (!video) {
-      return { ok: false, error: `video not found for bvid=${bvid}`, retryable: false };
+    const bootstrap = await ensureVideoByBvid(bvid, signal);
+    if (!bootstrap.ok) {
+      // V0.2.2：不再报「本地 video not found」—— bootstrap 负责按需从 /view 补齐依赖，
+      // 失败时携带真实原因（视频信息获取失败 / 网络失败 / 非法 BV）。
+      return {
+        ok: false,
+        error: bootstrap.error,
+        retryable: bootstrap.retryable,
+        ...(bootstrap.biliCode !== undefined || bootstrap.httpStatus !== undefined
+          ? {
+              diagnostics: {
+                ...(bootstrap.biliCode !== undefined ? { biliCode: bootstrap.biliCode } : {}),
+                ...(bootstrap.httpStatus !== undefined ? { httpStatus: bootstrap.httpStatus } : {}),
+                message: bootstrap.error,
+              },
+            }
+          : {}),
+      };
     }
+    const video = bootstrap.video;
     const aid = video.aid;
     const sort = opts.sort ?? 'time';
     const mode = sort === 'hot' ? 3 : 2;

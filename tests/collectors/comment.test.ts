@@ -233,12 +233,17 @@ describe('P0-1 · pagination_str 协议构造', () => {
 // ── P0-2 / P0-3 / P0-4 采集行为 ─────────────────────────────────────────────
 
 describe('CommentCollector · V0.2.1 分页协议与不变量', () => {
-  it('requires video to be in DB', async () => {
+  it('V0.2.2: 本地无 Video 时会自动 bootstrap（不再直接报 video not found）', async () => {
+    // 未 seedVideo，但 view 接口正常 → 应自动补依赖并继续采集
+    installFetch(() =>
+      json(mainPage({ replies: [reply(1)], all_count: 1, is_end: true, next_offset: null })),
+    );
+    // 该用例的关注点：错误信息不再出现「video not found for bvid=」
     const c = new CommentCollector();
     const r = await c.collect({ targetId: BVID });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.error).toMatch(/video not found/);
+    if (!r.ok) {
+      expect(r.error).not.toMatch(/video not found for bvid=/);
+    }
   });
 
   it('P0-2: 第2页请求必须带 pagination_str，且 offset 来自第1页 next_offset；两页不同则全部入库', async () => {

@@ -24,6 +24,55 @@
 - GitHub 仓库推送因当前环境无 `gh` CLI / 无 git credential，未自动执行。
 - Gemini Adapter 实现但 V0.1 不测试（环境无 Key）。
 
+## [V0.2.2] - 2026-09-28
+
+**「裸 BV 评论采集依赖闭环修复」**：V0.2.1 修好了评论分页协议，但评论模块仍**没有**「BV → 本地 Video 记录」的 bootstrap 流程。用户在评论页直接输入一个本地从未采过的合法 BV，采集必然失败。
+
+### 根因
+
+调用链是 `comment-page.tsx → handleFetch() → CommentCollector.collectComments(bvid) → videoRepo.findByBvid(bvid)`；本地没有该 Video 时**直接返回 `video not found for bvid=<BV>`**。也就是说：**评论功能对「裸 BV」完全不可用**——只有先经过 VideoCollector（UP 主投稿列表）才会存在 Video 记录。
+
+`src/content/detect.ts` 的 `bvidToAid()` 只取 aid、不写 Video，因此不是完整修复。
+
+复现：真实 Chrome，评论页输入 `BV1D9aA61E6v`（本地无记录）→ 报 `采集失败：video not found for bvid=BV1D9aA61E6v`。**这与评论 API / `pagination_str` / WBI 无关**，是依赖前置条件缺失。
+
+### P0 — 依赖闭环（核心修复）
+
+- **P0-1 新增 `src/services/video-bootstrap.ts`**：暴露 `ensureVideoByBvid(bvid, signal?)`，职责单一——确保 `bvid` 在本地有可用的**持久化** Video 记录。
+  1. `videoRepo.findByBvid(bvid)` 先查本地；**命中 → 直接返回，0 次额外 `/view` 请求**（`fetched:false`）。
+  2. 本地没有 → `GET https://api.bilibili.com/x/web-interface/view?bvid=<BV>`，`Referer=https://www.bilibili.com/video/<BV>`，匿名（`credentials:'omit'`）。
+  3. 判码严格：HTTP/网络失败 → **保留真实错误**（`视频信息获取失败：<真实消息>`），绝不吞成「视频不存在」；`code !== 0` → `视频信息获取失败：<业务码说明>`（`-404` 稿件不存在 / `-400` 请求错误 / `62002` 不可见 / 风控码按 `BILI_BLOCKED_CODES` 标 `retryable`）；`data` 缺失 → 失败。
+  4. `owner.mid` / `owner.name` → 建立**最小** Creator（`uid` / `name` / `spaceUrl`；`level` / `followers` / `following` / `videoCount` 保持 **null**，**绝不伪造统计**）；Creator 已存在则**复用其 id**。
+  5. normalize → `videoRepo.upsertByBvid()` → `findByBvid()` 取回**真正存在于 Dexie 的记录**并返回。
+- **P0-2 新增 `normalizeVideoDetail()`（`src/normalizers/video.ts`）**：`/view` 是**嵌套 `{data:{...}}`** 结构，且 UP 主在 `owner.mid/name/face`（列表是顶层 `mid/author`）。未强塞进列表用的 `rawVideoSchema`（那会把缺失字段默认成空串，违背「unknown ≠ 默认值」），而是单独建 schema，但**字段解析全部复用** `parsePubTimeToIso` / `parseDurationToSeconds` / `parseViews` / `parseAuthor`。结构非法（缺 `bvid`/`aid`）返回 `null`，**不写脏数据**。
+- **P0-3 `CommentCollector` 改为经 bootstrap 取依赖**：`const video = await ensureVideoByBvid(bvid, signal);`。**分页逻辑一行未动**（`aid` / `pagination_str` / `seenRpidStr` / maxPages / 二级 `pn`·`ps` / diagnostics / environmentLimited 全部保留）。
+- **P0-4 UI 错误分类**：`comment-page.tsx` 不再把一切失败压成「采集失败」，而是区分——① 视频元数据获取失败 → `无法获取视频信息：…`；② 评论接口风控 → `采集受阻：评论接口风控（环境受限）· …`（带 `environmentLimited` 诊断）；③ 其他 → `采集失败：…`。
+
+### P1 — 测试与语义
+
+- **测试 A**：bootstrap happy path（本地无 Video → 真实 view 结构 → 自动建 Creator + Video → 评论接口 → 评论入库 Dexie）。
+- **测试 B**：已有 Video → **断言 `/view` 请求数 = 0**（本地命中不重复请求；连续两次调用 1 → 0）。
+- **测试 C**：`{code:-404,data:null}` → `ok:false`、`metadataFailed`、**不写脏数据**、**不打评论请求**、错误明说「视频信息获取失败」而非本地「video not found」。
+- **测试 D**：view 结构非法（缺 `data` / 缺 `aid` / `bvid` 格式错）→ 失败且零脏数据；非法 bvid 入参 → 零请求。
+- **测试 E**：unknown 语义——`duration`/`pubdate`/`stat` 缺失时**不得伪造 0 / `Date.now()`**（`duration=null` / `pubTime=null` / `views=null`）；`duration:"03:32"` → 212s。
+- **测试 F**：真实 BV `BV1D9aA61E6v` 回归——用**真实 `/view` 响应 fixture**（新增 `tests/fixtures/real/view-detail-BV1D9aA61E6v.json`，嵌套 `data` + `owner` + `stat`），并验证「同一 fixture 若外层 `code=-404` 必须失败」（证明判码真实生效，**不硬编码「永远成功」**）。
+- **性能**：常规「本地已有 Video」评论路径 = **0 次额外 view**；首次遇到 BV = **恰好 1 次 view**；刷新评论不重复请求详情。
+
+### Engineering
+
+- 修正既有测试对 V0.2.1 行为的过时断言（原 `requires video to be in DB` 期望 `video not found`），改为断言「本地无 Video 时会自动 bootstrap，不再直接报 video not found」。
+- 测试：**243 passed / 1 skipped（28 files）**（新增 `tests/services/video-bootstrap.test.ts` 19 passed）；`typecheck` / `lint`（0 error）/ `build` 全绿。
+- 版本号统一：package.json / manifest.json / CHANGELOG / DEPLOYMENT / FINAL_AUDIT / PROGRESS 全部对齐 **V0.2.2**。
+
+### 验收口径（工程门禁 ≠ 真实链路）
+
+`typecheck / test / lint / build` 全绿仅为**工程门禁 PASS**。真实链路结果单独记录：真实 Chrome E2E（`CHROME_E2E_PASS`）/ 真实 `/view` 是否真的被访问 —— **绝不合并两种口径**，也不把 offline fixture PASS 当成 real API PASS。
+
+### Known limitations
+
+- 真实 Chrome E2E 需安装已构建扩展到 Chrome 并人工/脚本验证；CI 保持离线确定（`tests/smoke/**` 已剔除）。
+- `normalizeVideoDetail` 不做 tag 采集（`/view` 不返回 `tag`）；`tags` 置空数组，待后续接详情标签接口。
+
 ## [V0.2.1] - 2026-09-28
 
 **「评论采集真实性修复」**：V0.2.0 的评论链路存在 P0 级数据链路问题——真实 Chrome 打开 `BV17u411E7UK` 只能拿到极少量评论，且一级/二级分页协议用错。本次修复对齐真实协议、补齐翻页不变量与跨页去重，并以真实接口验证。

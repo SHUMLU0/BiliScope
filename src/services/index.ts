@@ -5,3 +5,4 @@ export * from './idea-loop';
 export * from './task-runner';
 export * from './export';
 export * from './import';
+export * from './video-bootstrap';

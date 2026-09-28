@@ -1,8 +1,49 @@
-# FINAL_AUDIT.md — BiliScope V0.2.1 最终审计
+# FINAL_AUDIT.md — BiliScope V0.2.2 最终审计
 
-> 生成于 2026-09-28 · 当前版本 **V0.2.1**（评论采集真实性修复：`pagination_str` 协议 + 翻页不变量 + 跨页去重）· **本地全门禁通过 · 真实 API PASS** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-28 · 当前版本 **V0.2.2**（裸 BV 评论采集依赖闭环修复：`ensureVideoByBvid` bootstrap）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
 >
-> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → **V0.2.1 评论采集真实性修复**
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → **V0.2.2 裸 BV 评论采集依赖闭环修复**
+
+---
+
+## 0-septies. V0.2.2 裸 BV 评论采集依赖闭环修复（P0 依赖前置）
+
+> 触发：真实 Chrome 在评论页直接输入一个**本地从未采过**的合法 BV（`BV1D9aA61E6v`）→ 报 `采集失败：video not found for bvid=BV1D9aA61E6v`。
+> 目标：让「裸 BV」自己补齐依赖（BV → Video → aid → 评论），**绝不用 mock 冒充真实成功**。
+
+### 根因（一句话）
+
+评论模块**没有**「BV → 本地 Video 记录」的 bootstrap 流程。调用链是 `comment-page.tsx → handleFetch() → CommentCollector.collectComments(bvid) → videoRepo.findByBvid(bvid)`，本地查不到就直接返回 `video not found for bvid=<BV>`。**这与评论 API / `pagination_str` / WBI 完全无关**——V0.2.1 已修好评论协议，这里缺的是**依赖前置条件**。`src/content/detect.ts` 的 `bvidToAid()` 只取 aid、不写 Video，不是完整修复。
+
+### 修复清单
+
+| 编号 | 级别 | 问题 | 修复 | 验证 |
+|---|---|---|---|---|
+| P0-1 | P0 | 评论模块无「BV → Video」bootstrap | 新增 `src/services/video-bootstrap.ts`：`ensureVideoByBvid(bvid, signal?)` —— 本地命中直接返回（`fetched:false`）；否则 `GET /x/web-interface/view?bvid=`（Referer `.../video/<BV>`，匿名）→ 严格判码 → 建**最小** Creator（统计字段 `null`）→ normalize → `videoRepo.upsertByBvid()` → 返回 Dexie 中真实记录 | 测试 A/B/F：happy path、`/view` 请求数 0/1、fixture 全链路 |
+| P0-2 | P0 | `/view` 是嵌套结构，硬塞列表 schema 会把缺失字段默认成空串 | 新增 `normalizeVideoDetail()`（单独 schema，但**复用** `parsePubTimeToIso`/`parseDurationToSeconds`/`parseViews`/`parseAuthor`）；`owner.mid/name/face` → 最小 Creator；结构非法 → `null`，不写脏数据 | 测试 D/E：缺 `data`/缺 `aid`/格式错 → 零脏数据 |
+| P0-3 | P0 | Collector 直接 `findByBvid` | 改为 `const video = await ensureVideoByBvid(bvid, signal)`；**分页逻辑零改动** | 评论测试 28 passed（分页/去重/不变量全部保留） |
+| P0-4 | P1 | UI 把一切失败压成「采集失败」 | `comment-page.tsx` 区分「无法获取视频信息」/「评论接口风控（环境受限）」/「采集失败」 | 测试 C 断言错误文案非本地「video not found」 |
+| P0-5 | P0 | 无真实 E2E 证明链路 | 新增 Chrome E2E spec `scripts/e2e-comment-bootstrap.mjs` | 见下表 |
+
+### 真实链路验收（与工程门禁分开记录）
+
+| 项 | 结果 |
+|---|---|
+| 真实 Chrome E2E（`scripts/e2e-comment-bootstrap.mjs`） | ⚠ **`CHROME_E2E_ENV_LIMITED`** —— 本机 Chrome 在命令行 `--load-extension` 下不加载未打包扩展（headed 与 `--headless=new` 均试；CDP targets 中只有 Chrome 内置组件扩展）。**非 FAIL**：链路已由离线全链路测试证明。手工跑法见 DEPLOYMENT.md 第八节。 |
+| 真实 `/view` 是否被访问 | 离线层：✅ 由 fixture + Collector 断言「先 view(1 次) → 评论接口 `oid=<真实 aid>`」；真实网络层：待手工 Chrome 确认 |
+| 离线全链路（fixture） | ✅ 通过：裸 BV → bootstrap → 评论接口带 fixture 真实 aid `113600005346789` → 评论写入 Dexie |
+
+> **结论口径不合并**：`typecheck/test/lint/build` 全绿 = **工程门禁 PASS**；真实 Chrome E2E = `CHROME_E2E_ENV_LIMITED`（本机环境限制，**不冒充 PASS，也非 FAIL**）。**绝不用 offline fixture PASS 冒充 real API PASS**。
+
+### 工程门禁（与真实链路**不合并**）
+
+| 项 | 结果 |
+|---|---|
+| `tsc --noEmit` | ✅ EXIT=0 |
+| `eslint` | ✅ EXIT=0（0 error / 9 warning，均为 `scripts/` 既有 `no-console`） |
+| `vitest run` | ✅ **243 passed / 1 skipped（28 files）** |
+| `vite build` | ✅ OK（111 modules · 4.05s） |
+| `scan-secrets` | ✅ 0 leaks |
 
 ---
 

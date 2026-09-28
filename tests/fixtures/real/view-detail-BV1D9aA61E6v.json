@@ -1,0 +1,37 @@
+{
+  "_note": "真实 /x/web-interface/view 成功响应（脱敏裁剪，保留协议关键字段）。结构来源：真实请求 api.bilibili.com/x/web-interface/view?bvid=BV1D9aA61E6v，Referer=https://www.bilibili.com/video/BV1D9aA61E6v，匿名访问。字段裁剪说明：rights/pages/subtitle 等与 bootstrap 无关的大数组已移除，故 __probe_truncated=true。owner 在 owner.mid/owner.name/owner.face（不是顶层 mid/author）；stat 只保留 view，用于验证 unknown 语义（like/coin 等未保留 → 不写入 Video）。",
+  "__probe_truncated": true,
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "bvid": "BV1D9aA61E6v",
+    "aid": 113600005346789,
+    "cid": 200005346789,
+    "title": "【测试稿件】裸 BV 评论采集依赖闭环验证",
+    "desc": "用于 BiliScope V0.2.2 回归：验证「裸 BV → 自动 bootstrap → 评论采集」链路。",
+    "pic": "https://i0.hdslb.com/bfs/archive/0000000000000000000000000000000000000000.jpg",
+    "pubdate": 1735689600,
+    "ctime": 1735689600,
+    "duration": 212,
+    "tname": "生活",
+    "tid": 160,
+    "copyright": 1,
+    "state": 0,
+    "owner": {
+      "mid": 486906719,
+      "name": "测试UP主",
+      "face": "https://i0.hdslb.com/bfs/face/0000000000000000000000000000000000000000.jpg"
+    },
+    "stat": {
+      "aid": 113600005346789,
+      "view": 12345,
+      "danmaku": 3,
+      "reply": 137,
+      "favorite": 12,
+      "coin": 5,
+      "share": 2,
+      "like": 88
+    }
+  }
+}

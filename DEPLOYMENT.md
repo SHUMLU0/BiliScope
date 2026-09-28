@@ -66,7 +66,33 @@ const payload = await exportAll();
 downloadBlob(toJsonBlob(payload), `biliscope-${new Date().toISOString().slice(0,10)}.json`);
 ```
 
-## 六、CI
+## 七、评论页使用（V0.2.2 起可直接输入裸 BV）
+
+打开 `comment.html`，**直接输入任意合法 BV**（例：`BV1D9aA61E6v`）→ 点「采集」：
+
+- 本地**已有**该 Video → 直接采评论，**不发** `/x/web-interface/view` 请求。
+- 本地**没有**该 Video → 自动 `bootstrap`：请求 `/x/web-interface/view` → 建立/复用 Creator → 写入 Video → 用其 `aid` 采集评论。
+
+失败信息会分类显示，不再一律「采集失败」：
+
+| 现象 | 含义 |
+|---|---|
+| `无法获取视频信息：视频信息获取失败：稿件不存在…` | BV 号有误 / 已删除 / 已下架 |
+| `无法获取视频信息：视频信息获取失败：响应缺少 data` | B 站返回结构异常（非 0 业务码或空 data） |
+| `采集受阻：评论接口风控（环境受限）· …` | 评论接口被风控（`environmentLimited`），可稍后重试 |
+| `采集失败：…` | 其他错误（网络 / 超时等） |
+
+## 八、真实 Chrome E2E（可选，验证 bootstrap 链路）
+
+```bash
+pnpm build
+node scripts/e2e-comment-bootstrap.mjs            # 默认 BV1D9aA61E6v
+BV=其他BV node scripts/e2e-comment-bootstrap.mjs
+```
+
+脚本会启动真实 Chrome（无头 + 加载 `dist/`），**先清空该 BV 的 Video 与评论**（并断言清理后 Video 计数为 0，证明不是预置数据），再在评论页输入裸 BV 触发采集，最后断言：Video 出现 + 评论入库 + `/x/web-interface/view` 真实被访问。结论分三档：`CHROME_E2E_PASS` / `CHROME_E2E_ENV_LIMITED`（未装 Chrome 或风控）/ `CHROME_E2E_FAIL`。
+
+## 九、CI
 
 `.github/workflows/ci.yml` 在 push 后自动跑：
 
@@ -83,8 +109,8 @@ downloadBlob(toJsonBlob(payload), `biliscope-${new Date().toISOString().slice(0,
 - 502 / 网络问题 → 重跑 workflow
 - 测试失败 → 本地 `pnpm test` 复现
 
-## 七、版本
+## 十、版本
 
-当前：**v0.2.1**（**V0.2.1 评论采集真实性修复：一级分页改用真实 `pagination_str` 协议、新增翻页前进不变量与跨页 `seenRpidStr` 去重、二级回复改 `pn/ps` 页码分页、新增真实响应 fixture 与真实 API E2E（`REAL_API_PASS`：pages=10/fetched=200/unique=200）**；承接 V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
+当前：**v0.2.2**（**V0.2.2 裸 BV 评论采集依赖闭环修复：新增 `src/services/video-bootstrap.ts` 的 `ensureVideoByBvid()`，评论页可直接输入裸 BV——本地无记录时自动请求 `/x/web-interface/view` 补齐 Creator + Video 依赖，本地已有时 0 次额外请求；新增 `normalizeVideoDetail()`、UI 失败分类、bootstrap 测试 A–F 与真实 Chrome E2E 脚本**；承接 V0.2.1 评论采集真实性修复（`pagination_str` 协议 + 翻页不变量 + 跨页去重，`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
 
-历史版本：v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。
+历史版本：v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。

@@ -60,12 +60,23 @@ export function CommentPage() {
     setDiag('');
     const r = await collector.collectComments(bvid, { sort, tier, depth });
     if (!r.ok) {
-      // P0-D：环境受限必须明确告知，不能显示成「采集完成 0 条」
+      // V0.2.2：区分失败类型，不再把所有失败都压成「采集失败」
+      //   1) 视频元数据获取失败（/view 非 0 / 网络 / 非法 BV）→ 明确说明
+      //   2) 评论接口风控 → 走 environmentLimited 诊断
+      const envLimited = r.diagnostics?.environmentLimited === true;
+      const code = r.diagnostics?.biliCode;
+      const metaFailed = /视频信息获取失败|视频写入失败|创作者记录建立失败/.test(r.error);
       setStatusLevel('error');
-      setStatus(`采集失败：${r.error}`);
+      setStatus(
+        envLimited
+          ? `采集受阻：评论接口风控（环境受限）· ${r.error}`
+          : metaFailed
+            ? `无法获取视频信息：${r.error}`
+            : `采集失败：${r.error}`,
+      );
       setDiag(
         r.diagnostics
-          ? `HTTP/业务码诊断：code=${r.diagnostics.biliCode ?? '—'} · 环境受限=${r.diagnostics.environmentLimited ? '是' : '否'} · 可重试=${r.retryable}`
+          ? `HTTP/业务码诊断：code=${code ?? '—'} · 环境受限=${envLimited ? '是' : '否'} · 可重试=${r.retryable}`
           : '',
       );
       await refresh();

@@ -5,6 +5,52 @@
 
 ---
 
+## V0.2.2 裸 BV 评论采集依赖闭环修复
+
+> 触发：真实 Chrome 在评论页直接输入本地从未采过的合法 BV（`BV1D9aA61E6v`）→ 报 `采集失败：video not found for bvid=BV1D9aA61E6v`。
+> 根因：评论模块**没有**「BV → 本地 Video」bootstrap 流程，`CommentCollector` 直接 `videoRepo.findByBvid` 查不到就失败。**与评论 API / `pagination_str` / WBI 无关**。
+
+| 编号 | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **P0-1** | `src/services/video-bootstrap.ts`（新） | ✅ | `ensureVideoByBvid(bvid, signal?)`：本地命中 → **0 请求**；否则 `GET /x/web-interface/view?bvid=` → 严格判码 → 建最小 Creator（统计字段 null，不伪造）→ `normalizeVideoDetail` → `videoRepo.upsertByBvid` → 返回 Dexie 中真实记录 |
+| **P0-2** | `normalizeVideoDetail()`（`src/normalizers/video.ts`） | ✅ | `/view` 是嵌套 `{data:{...}}`、UP 主在 `owner.mid/name/face`；单独建 schema 但**复用** `parsePubTimeToIso`/`parseDurationToSeconds`/`parseViews`/`parseAuthor`；结构非法返回 `null` |
+| **P0-3** | `CommentCollector` 依赖获取 | ✅ | 改为 `const video = await ensureVideoByBvid(bvid, signal)`；**分页逻辑零改动** |
+| **P0-4** | UI 错误分类 | ✅ | `comment-page.tsx` 区分「无法获取视频信息」/「评论接口风控（环境受限）」/「采集失败」三类 |
+| **A** | bootstrap happy path 测试 | ✅ | 本地无 Video → 真实 view 结构 → 自动建 Creator + Video → 评论接口 → 评论入库 Dexie |
+| **B** | 已有 Video 性能测试 | ✅ | **断言 `/view` 请求数 = 0**；连续两次调用 1 → 0 |
+| **C** | view 业务码非 0 测试 | ✅ | `{code:-404,data:null}` → `ok:false`/`metadataFailed`/零脏数据/**零评论请求**/错误非「video not found」 |
+| **D** | view 结构非法测试 | ✅ | 缺 `data`/缺 `aid`/`bvid` 格式错 → 失败零脏数据；非法 bvid → 零请求 |
+| **E** | unknown 语义测试 | ✅ | `duration`/`pubdate`/`stat` 缺失 → `null`（**不伪造 0 / `Date.now()`**）；`"03:32"` → 212s |
+| **F** | 真实 BV `BV1D9aA61E6v` 回归 | ✅ | 新增真实 `/view` fixture `view-detail-BV1D9aA61E6v.json`（嵌套 `data`）；同 fixture 外层 `code=-404` 必须失败（证明判码真实生效） |
+| **P0-5** | Chrome E2E spec（真实验证） | ✅ | `scripts/e2e-comment-bootstrap.mjs`：CDP 驱动真实 Chrome → 识别 BiliScope 扩展 origin（`fetch` 探测，不误认内置组件扩展）→ 清空该 BV 的 Video/Comment 并断言清理后计数为 0 → 评论页输入裸 BV → 采集 → 断言 Video 出现 + 评论入库 + `/view` 真实被访问 |
+
+### 门禁（V0.2.2）
+
+| 命令 | 结果 | 证据 |
+|---|---|---|
+| `tsc --noEmit` | ✅ EXIT=0 | — |
+| `eslint` | ✅ EXIT=0 | 0 error（9 个既有 `no-console` warning，全在 `scripts/`） |
+| `vitest run` | ✅ **243 passed / 1 skipped（28 files）** | 新增 `tests/services/video-bootstrap.test.ts` 19 passed |
+| `vite build` | ✅ OK | 111 modules · 4.05s |
+| `scan-secrets` | ✅ 0 leaks | — |
+| 真实 Chrome E2E | ⚠ **`CHROME_E2E_ENV_LIMITED`** | 见下方「环境限制」 |
+| `git status` → commit → push → CI | ⬜ 本轮最后执行 | **单个分组提交**（非逐模块） |
+
+#### Chrome E2E 环境限制（如实记录，未通过 ≠ 未验证）
+
+本机 Chrome 在命令行 `--load-extension=<dist>`（headed 与 `--headless=new` 均试）下**不加载未打包扩展**——CDP `/json/list` 只有 Chrome 自带组件扩展（Hangouts `nkeimhogjdpnpccoofpliimaahmaaome` 等），BiliScope 未出现在 targets 中。因此本机无法完成自动化 Chrome E2E，判定 **`CHROME_E2E_ENV_LIMITED`**（不是 FAIL，也不是 PASS）。
+
+手工跑通方式：
+1. `pnpm build` → `chrome://extensions` → 开发者模式 → 「加载已解压的扩展程序」→ 选 `dist/`
+2. 取该扩展 ID，`EXT_ID=<id> CHROME_PATH=<chrome路径> node scripts/e2e-comment-bootstrap.mjs`
+
+**链路已由离线全链路测试证明**（`tests/services/video-bootstrap.test.ts` F 组）：真实 `/view` fixture → 裸 BV bootstrap → 评论接口 `oid` 等于 fixture 的真实 `aid` → 评论写入 Dexie。真实网络层的最终确认待手工 Chrome 验证。
+
+> **门禁顺序固定**：typecheck → test → lint → build → secret-scan → acceptance → git status → commit → push → CI。
+> **结论分级**（最终报告不合并）：OFFLINE PASS / INTEGRATION PASS / REAL API PASS / REAL API ENVIRONMENT LIMITED / CHROME E2E PASS。
+
+---
+
 ## V0.2.1 评论采集真实性修复（`pagination_str` 协议 + 翻页不变量 + 跨页去重）
 
 > 触发：真实 Chrome 打开 `BV17u411E7UK` 只能取到极少量评论。根因：一级分页参数写成了**不存在**的 `pagination_reply`，正确参数是 **`pagination_str`**。

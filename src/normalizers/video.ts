@@ -180,6 +180,112 @@ function isValidUrl(s: string | undefined | null): s is string {
   }
 }
 
+/**
+ * `/x/web-interface/view` 详情响应结构（V0.2.2）。
+ *
+ * 与列表接口的差异：
+ *   - 详情用 `desc` / `pic` / `pubdate` / `duration`（秒）/ `tname`，
+ *     没有列表的 `tag`（用 `dynamic`/`desc` 之外还有一个 `tname`，标签需另接口）。
+ *   - UP 主在 `owner.mid` / `owner.name` / `owner.face`（列表是顶层 `mid` / `author`）。
+ *   - 指标在 `stat.view/like/coin/favorite/share/reply/danmaku`。
+ *
+ * 之所以不复用 `rawVideoSchema`：那份 schema 针对列表（`z.string().default('')` 的
+ * title/tag 等），把详情硬塞进去会强行把缺失字段默认成空串，违背「unknown ≠ 默认值」。
+ * 这里单独建 schema，但**字段解析全部复用** `parseDurationToSeconds` /
+ * `parsePubTimeToIso` / `parseViews` / `parseAuthor`，不重复实现。
+ */
+const videoDetailSchema = z
+  .object({
+    bvid: z.string().regex(/^BV[0-9A-Za-z]{10}$/),
+    aid: z.number().int().positive(),
+    title: z.string(),
+    desc: z.string().optional(),
+    pic: z.string().optional(),
+    pubdate: z.number().int().optional(),
+    duration: z.union([z.number(), z.string()]).optional(),
+    tname: z.string().optional(),
+    owner: z
+      .object({
+        mid: z.union([z.number(), z.string()]).optional(),
+        name: z.string().optional(),
+        face: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+    stat: z
+      .object({
+        view: z.number().int().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+export interface VideoDetailResult {
+  video: Video;
+  /** UP 主最小信息（用于建立 / 复用最小 Creator 记录）；缺失时为 null，绝不伪造 */
+  owner: { uid: number; name: string; avatar?: string } | null;
+}
+
+/**
+ * 归一化 `/x/web-interface/view` 的 **成功响应**（调用方须先确认 `code===0 && data`）。
+ *
+ * 返回 `null` 表示结构非法（缺 bvid / aid 等关键字段），**不得写入脏数据**。
+ * 未知值语义：duration 解析不出 → null；pubTime 缺失 → null（绝不回退 `Date.now()`）；
+ * views 缺失 → undefined（UI 显示 –）。
+ */
+export function normalizeVideoDetail(
+  raw: unknown,
+  opts: { creatorId: string; source?: Source; now?: string },
+): VideoDetailResult | null {
+  const now = opts.now ?? nowIso();
+  const parsed = videoDetailSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const d = parsed.data;
+  const rest = d as unknown as Record<string, unknown>;
+  const cover = isValidUrl(d.pic) ? d.pic : undefined;
+  const { authorName, authorMid } = parseAuthor(rest);
+
+  const ownerRaw = d.owner;
+  let owner: VideoDetailResult['owner'] = null;
+  if (ownerRaw) {
+    const uidNum = typeof ownerRaw.mid === 'number' ? ownerRaw.mid : Number(ownerRaw.mid);
+    const name = typeof ownerRaw.name === 'string' ? ownerRaw.name.trim() : '';
+    if (Number.isFinite(uidNum) && uidNum > 0 && name) {
+      owner = {
+        uid: Math.floor(uidNum),
+        name,
+        ...(isValidUrl(ownerRaw.face) ? { avatar: ownerRaw.face } : {}),
+      };
+    }
+  }
+
+  const candidate = {
+    id: newId('vd'),
+    bvid: d.bvid,
+    aid: d.aid,
+    creatorId: opts.creatorId,
+    title: d.title.trim() || d.bvid,
+    description: typeof d.desc === 'string' ? d.desc : '',
+    cover,
+    pubTime: parsePubTimeToIso(rest),
+    duration: parseDurationToSeconds(rest.duration),
+    category: typeof d.tname === 'string' && d.tname ? d.tname : '',
+    authorName,
+    authorMid,
+    views: d.stat?.view ?? parseViews(rest) ?? undefined,
+    tags: [],
+    url: `https://www.bilibili.com/video/${d.bvid}`,
+    createdAt: now,
+    updatedAt: now,
+    source: opts.source ?? 'bili-api',
+  };
+  const final = videoSchema.safeParse(candidate);
+  if (!final.success) return null;
+  return { video: final.data, owner };
+}
+
+
 const statRespSchema = z
   .object({
     code: z.number().int().default(0),
