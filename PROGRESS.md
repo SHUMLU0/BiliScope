@@ -18,7 +18,7 @@
 | 7) CreatorCollector: 返回持久化 ID 而非 temp ID | ✅ | upsert 后用 persistedId 重读并返回 |
 | 8) 真实 API smoke test | ✅ | tests/smoke/real-api.test.ts · 3 cases · 命中 B 站真实 nav / search / view |
 | 9) typecheck + lint + test + build 全绿 | ✅ | 113/113 tests · 0 lint · build OK · 0 secrets |
-| 10) commit + push + CI 绿色 | 🔄 | 进行中 |
+| 10) commit + push + CI 绿色 | ✅ | commit `5223dcd` + Run #36413095312 (✓ 35s) |
 
 ---
 
@@ -72,7 +72,8 @@
 | `pnpm test` | ✅ **113/113 PASS**（19 files，新增 6 V0.1.1 单测 + 3 smoke） |
 | `pnpm build` | ✅ EXIT=0 |
 | `pnpm scan-secrets` | ✅ 0 leaks |
-| `pnpm verify-acceptance` | ✅ TEST 001-009 PASSED（010/011 commit 后验证） |
+| `pnpm verify-acceptance` | ✅ TEST 001-009 PASSED |
+| `git push → CI` | ✅ Run #36413095312（✓ 35s） |
 
 ---
 
