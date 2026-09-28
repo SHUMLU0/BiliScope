@@ -45,6 +45,12 @@ jobs:
       - name: Build (CRX)
         run: pnpm build
 
+      # V3.0.1 · P0-3：UI 区序验收**必须以最终构建产物为准**。
+      # 上面的「Unit tests (offline)」跑在 build 之前，此时 UI-ORDER-001 会优雅跳过；
+      # 这里在 build 之后用严格模式重跑，确保「以 dist 验收」这条硬要求不被绕过。
+      - name: UI order acceptance (dist, strict)
+        run: pnpm test:dist
+
       - name: Secret scan
         run: node scripts/scan-secrets.mjs
 

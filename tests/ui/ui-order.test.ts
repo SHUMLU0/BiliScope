@@ -7,7 +7,11 @@
  * 本测试直接检查 `dist/` 中评论页的构建产物：
  * 在页面级 JSX 的**渲染顺序**里，AI 区（AI 分析状态 / AI 分析报告）必须先于「统计事实」出现。
  *
- * 若 dist 尚未构建，测试会明确跳过并提示先执行 `pnpm build`（不算通过、也不算失败）。
+ * ── 两种运行模式（关键设计，避免「CI 无 dist 时假失败」）──
+ *  · 默认（CI「Unit tests (offline)」阶段，dist 尚未构建）：
+ *    dist 缺失时**整组优雅跳过** —— 不算通过、也不算失败，绝不误报。
+ *  · 严格验收（本地 / 验收阶段，`UI_ORDER_STRICT=1` 且已 `pnpm build`）：
+ *    dist 必须存在，否则**明确失败**，保证「以最终产物验收」这条硬要求不被绕过。
  */
 
 import { describe, expect, it } from 'vitest';
@@ -29,15 +33,19 @@ function findCommentChunk(): string | null {
 const chunk = findCommentChunk();
 const distReady = chunk !== null && existsSync(DIST_HTML);
 
+// 严格模式：验收时必须对真实产物断言，绝不静默跳过
+const STRICT = process.env.UI_ORDER_STRICT === '1';
+
 describe('UI-ORDER-001 · AI 报告位于统计事实之前（以 dist 为准）', () => {
-  it('dist 构建产物存在（否则本用例无法作为验收依据）', () => {
+  it.skipIf(!STRICT)('dist 构建产物存在（严格模式下必须已构建）', () => {
     expect(
       distReady,
-      'dist 未构建：请先执行 `pnpm build`，随后本用例才能对最终产物做顺序验收',
+      'UI_ORDER_STRICT=1 但 dist 未构建：请先执行 `pnpm build`，随后本用例才能对最终产物做顺序验收',
     ).toBe(true);
   });
 
-  it('评论页 dist 的渲染顺序中，AI 区先于「统计事实」', () => {
+  it.skipIf(!distReady)('评论页 dist 的渲染顺序中，AI 区先于「统计事实」', () => {
+
     if (!distReady || !chunk) return;
     const js = readFileSync(chunk, 'utf8');
 
@@ -68,7 +76,7 @@ describe('UI-ORDER-001 · AI 报告位于统计事实之前（以 dist 为准）
     expect(idxTop).toBeLessThan(idxLocal);
   });
 
-  it('页面根元素顺序与 §3 规定一致：标题 → 控件卡 → AI 区 → 统计事实', () => {
+  it.skipIf(!distReady)('页面根元素顺序与 §3 规定一致：标题 → 控件卡 → AI 区 → 统计事实', () => {
     if (!distReady || !chunk) return;
     const js = readFileSync(chunk, 'utf8');
 
