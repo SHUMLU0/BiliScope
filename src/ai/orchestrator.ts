@@ -27,6 +27,7 @@ import {
   validateAIResult,
   type AIDomain,
   type CommentAIResult,
+  type GeneralAIResult,
 } from './schemas';
 import { zodToStrictJsonSchema } from './json-schema';
 import {
@@ -38,9 +39,18 @@ import {
 import type { AnalyzeRequest, AnalyzeResponse, ProviderConfig, ProviderName } from './types';
 import type { AIAnalysis, CommentAnalysis } from '@models/index';
 
-/** 本地化的校验结果类型（避免从 schemas 额外导入类型名造成耦合） */
+/**
+ * 本地化的校验结果类型。
+ *
+ * ⚠️ `data` 必须允许 `CommentAIResult | GeneralAIResult`：
+ * `validateAIResult()` 的返回类型是 `SchemaValidation`（宽联合），
+ * 而运行期 `domain` 只在 comment 分支才会把 data 当作 `CommentAIResult` 使用
+ * （见下方 `const data = validation.data as CommentAIResult`）。
+ * 若这里收窄成只有 `CommentAIResult`，`creator/video/idea` 的 `GeneralAIResult`
+ * 就无法赋值，TS2322。
+ */
 type SchemaValidationLike =
-  | { ok: true; data: CommentAIResult }
+  | { ok: true; data: CommentAIResult | GeneralAIResult }
   | { ok: false; error: string; issues: string[] };
 
 // ─────────────────────────────────────────────────────────── 任务默认 token

@@ -144,10 +144,10 @@ describe('GeminiAdapter · Structured Output', () => {
 
   it('degrades responseSchema → responseMimeType only when rejected', async () => {
     let call = 0;
-    const gcs: Record<string, Record<string, unknown>>[] = [];
+    const gcs: Array<Record<string, unknown>> = [];
     globalThis.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
-      const b = JSON.parse(String(init?.body ?? '{}')) as { generationConfig: Record<string, unknown> };
-      gcs.push(b.generationConfig);
+      const b = JSON.parse(String(init?.body ?? '{}')) as { generationConfig?: Record<string, unknown> };
+      gcs.push(b.generationConfig ?? {});
       call++;
       if (call === 1) return new Response('responseSchema invalid', { status: 400 });
       return jsonResponse({ candidates: [{ content: { parts: [{ text: '{}' }] }, finishReason: 'STOP' }] });

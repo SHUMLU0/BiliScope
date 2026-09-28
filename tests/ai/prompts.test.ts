@@ -184,7 +184,7 @@ describe('prompts · Comment（V3.0 单 schema）', () => {
       comments: [comment],
       factsJson: '{broken',
     });
-    const parsed = JSON.parse(user) as { facts?: unknown };
+    const parsed = JSON.parse(user) as { facts?: unknown; sample: unknown[] };
     expect(parsed.facts).toBeUndefined();
     expect(parsed.sample).toHaveLength(1);
   });
