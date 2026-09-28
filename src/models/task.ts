@@ -9,6 +9,7 @@ export const collectionTaskTypeEnum = z.enum([
   'video-comments',
   'hot-topic',
   'search',
+  'my-data',
   'ai-analysis',
 ]);
 

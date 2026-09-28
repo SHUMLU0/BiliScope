@@ -8,21 +8,25 @@ import type { Idea, IdeaStatus } from '@models/idea';
 const STATUS_LABEL: Record<IdeaStatus, string> = {
   idea: '想法',
   researching: '调研',
+  reviewing: '评估',
   ready: '待做',
   producing: '制作中',
   published: '已发布',
   verified: '已验证',
   discarded: '丢弃',
+  archived: '归档',
 };
 
 const ORDER: IdeaStatus[] = [
   'idea',
   'researching',
+  'reviewing',
   'ready',
   'producing',
   'published',
   'verified',
   'discarded',
+  'archived',
 ];
 
 export function IdeaPage() {

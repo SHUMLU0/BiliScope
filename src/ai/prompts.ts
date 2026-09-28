@@ -106,24 +106,39 @@ export function buildVideoAnalyzePrompt(ctx: VideoAnalyzeCtx): { system: string;
 export interface CommentAnalyzeCtx {
   videoId: string;
   comments: Comment[];
+  /** V0.2 · P0-F：客观统计事实（与 AI 推断分离）。由 services/comment-prep 生成。 */
+  factsJson?: string;
+  /** V0.2 · P0-F：支持 / 反对观点必须引用这些原始评论 rpid，禁止凭空断言。 */
+  requireCitations?: boolean;
 }
 
 export function buildCommentAnalyzePrompt(ctx: CommentAnalyzeCtx): { system: string; user: string } {
+  const requireCitations = ctx.requireCitations !== false;
   const system = [
     '你是一名 B 站评论区研究分析师。',
     '区分主题 / 高频问题 / 支持观点 / 反对观点 / 用户痛点 / 情绪 / 争议。',
     '词频 ≠ 因果。',
     '必须分三段输出：facts / explanations / uncertainty。',
+    requireCitations
+      ? '支持 / 反对观点必须附带原始评论的 rpid（输出字段 support / opposition 的每项都带 "rpid" 引用），禁止凭空断言。'
+      : '',
+    ctx.factsJson ? '系统会先给出「客观统计事实」块；你的 facts 段必须与该块一致，不得编造数字。' : '',
     SCHEMA_NOTE,
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 
   const user = JSON.stringify(
     {
       videoId: ctx.videoId,
+      // V0.2 · P0-F：事实块与样本块分开，明确「已算好的数字」vs「待解释的原文」
+      facts: ctx.factsJson ? JSON.parse(ctx.factsJson) : undefined,
       sample: ctx.comments.slice(0, 200).map((c) => ({
+        rpid: c.rpidStr,
         uname: c.uname,
         content: c.content.slice(0, 300),
         like: c.like,
+        level: c.replyLevel,
       })),
     },
     null,

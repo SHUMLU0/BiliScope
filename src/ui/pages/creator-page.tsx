@@ -4,8 +4,15 @@ import { CreatorCollector } from '@collectors/creator-collector';
 import { VideoCollector } from '@collectors/video-collector';
 import { aiAnalyze } from '@ai/service';
 import { buildCreatorAnalyzePrompt } from '@ai/prompts';
-import { creatorSnapshotRepo, videoRepo } from '@repositories/index';
-import { formatDuration, formatInt, nowIso } from '@utils/time';
+import { creatorRepo, creatorSnapshotRepo, videoRepo } from '@repositories/index';
+import { computeCreatorDelta } from '@services/analytics';
+import {
+  creatorContentStructure,
+  creatorContentChange,
+  detectBreakoutVideos,
+} from '@services/creator-research';
+import { runTask } from '@services/task-runner';
+import { formatDuration, formatInt, formatPct, nowIso } from '@utils/time';
 import type { Creator, CreatorSnapshot, Video } from '@models/index';
 
 const creatorCollector = new CreatorCollector();
@@ -18,6 +25,12 @@ export function CreatorPage() {
   const [videos, setVideos] = useState<Video[]>([]);
   const [status, setStatus] = useState('');
   const [aiText, setAiText] = useState('');
+
+  // V0.2 · P1（Group C）：账号内容结构 / 变化 / 突破（纯描述性统计，非预测）
+  const structure = creatorContentStructure(videos);
+  const change = creatorContentChange(videos);
+  const breakouts = detectBreakoutVideos(videos);
+  const delta = computeCreatorDelta(snapshots);
 
   // V0.1.3：哪些指标本次真的没拿到（null），在状态区如实说明，不用 0 糊过去
   const unavailable = creator
@@ -32,7 +45,7 @@ export function CreatorPage() {
   const refresh = async (c: Creator): Promise<void> => {
     const [sn, vd] = await Promise.all([
       creatorSnapshotRepo.listByCreator(c.id),
-      videoRepo.listByCreator(c.id, { limit: 30 }),
+      videoRepo.listByCreator(c.id, { limit: 100 }),
     ]);
     setSnapshots(sn.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1)));
     setVideos(vd);
@@ -44,25 +57,25 @@ export function CreatorPage() {
       return;
     }
     setStatus('采集账号…');
-    const r1 = await creatorCollector.collect({ targetId: uid });
-    if (!r1.ok) {
-      setStatus(`失败：${r1.error}`);
+    // Group G：包成可追踪任务
+    const task = await runTask('creator', uid, () => creatorCollector.collect({ targetId: uid }));
+    if (task.status === 'failed') {
+      setStatus(`失败：${task.errorMessage ?? '未知错误'}`);
       return;
     }
-    const c = r1.data[0];
+    const c = await creatorRepo.findByUid(Number(uid));
     if (!c) {
       setStatus('返回为空');
       return;
     }
-    setStatus(`已采集 ${c.name}（粉丝 ${formatInt(c.followers)}）`);
     setCreator(c);
     await refresh(c);
-    setStatus('采集视频列表…');
+    setStatus(`已采集 ${c.name}（粉丝 ${formatInt(c.followers)}）· 采集视频列表…`);
     const r2 = await videoCollector.collectByCreator(c.uid);
     if (!r2.ok) {
       setStatus(`视频失败：${r2.error}`);
     } else {
-      setStatus(`完成 · ${r2.data.length} 视频`);
+      setStatus(`完成 · ${r2.data.length} 视频（新增 ${r2.stats?.added ?? 0} / 更新 ${r2.stats?.updated ?? 0}）`);
       await refresh(c);
     }
   };
@@ -192,6 +205,139 @@ export function CreatorPage() {
               </table>
             )}
           </section>
+
+          <section className="card stack">
+            <h3 style={{ margin: 0 }}>内容结构（客观统计）</h3>
+            <div className="faint">{structure.note}</div>
+            {structure.videoCount === 0 ? (
+              <div className="empty">暂无视频</div>
+            ) : (
+              <>
+                <div className="row wrap">
+                  <Metric label="已采集视频" value={formatInt(structure.videoCount)} />
+                  <Metric
+                    label="主要分区"
+                    value={structure.categoryDistribution[0]?.key ?? '–'}
+                  />
+                  <Metric
+                    label="主分区占比"
+                    value={
+                      structure.categoryDistribution[0]
+                        ? formatPct(structure.categoryDistribution[0].ratio)
+                        : '–'
+                    }
+                  />
+                </div>
+                {structure.durationDistribution.length > 0 && (
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>时长区间</th>
+                        <th>数量</th>
+                        <th>占比</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {structure.durationDistribution.map((d) => (
+                        <tr key={d.key}>
+                          <td>{d.key}</td>
+                          <td>{d.count}</td>
+                          <td className="faint">{formatPct(d.ratio)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {structure.topTags.length > 0 && (
+                  <div className="row wrap">
+                    {structure.topTags.map((t) => (
+                      <span key={t.tag} className="tag">
+                        {t.tag} · {t.count}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+
+          <section className="card stack">
+            <h3 style={{ margin: 0 }}>内容变化（前 / 后半段对比）</h3>
+            <div className="faint">{change.note}</div>
+            {change.earlyCount === 0 ? (
+              <div className="empty">可比样本不足</div>
+            ) : (
+              <table>
+                <tbody>
+                  <tr>
+                    <td>主分区</td>
+                    <td>
+                      {change.earlyTopCategory ?? '–'} → {change.recentTopCategory ?? '–'}
+                      {change.categoryShifted && <span className="warn"> · 已变化</span>}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>平均时长</td>
+                    <td>
+                      {change.earlyAvgDuration === null ? '–' : `${Math.round(change.earlyAvgDuration)}s`} →{' '}
+                      {change.recentAvgDuration === null ? '–' : `${Math.round(change.recentAvgDuration)}s`}
+                      {change.durationDelta !== null && (
+                        <span className="faint">（{change.durationDelta >= 0 ? '+' : ''}{Math.round(change.durationDelta)}s）</span>
+                      )}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>发布频率（每 30 天）</td>
+                    <td>
+                      {change.earlyRatePer30d === null ? '–' : change.earlyRatePer30d.toFixed(1)} →{' '}
+                      {change.recentRatePer30d === null ? '–' : change.recentRatePer30d.toFixed(1)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            )}
+          </section>
+
+          {breakouts.length > 0 && (
+            <section className="card stack">
+              <h3 style={{ margin: 0 }}>突破视频（≥ 中位数 2 倍）</h3>
+              <div className="faint">相对该账号自身播放中位数的倍数，仅为事实描述，非走向预测。</div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>标题</th>
+                    <th>播放</th>
+                    <th>倍数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {breakouts.slice(0, 10).map((b) => (
+                    <tr key={b.videoId}>
+                      <td>
+                        <a href={`comment.html?bvid=${b.bvid}`}>{b.title}</a>
+                      </td>
+                      <td>{formatInt(b.views)}</td>
+                      <td className="mono">{b.multipleOfMedian.toFixed(1)}×</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
+
+          {delta && (
+            <section className="card stack">
+              <h3 style={{ margin: 0 }}>账号变化（首 → 末快照）</h3>
+              <div className="row wrap">
+                <Metric label="粉丝变化" value={delta.followerDelta === null ? '–' : `${delta.followerDelta >= 0 ? '+' : ''}${formatInt(delta.followerDelta)}`} />
+                <Metric label="投稿变化" value={delta.videoCountDelta === null ? '–' : `${delta.videoCountDelta >= 0 ? '+' : ''}${delta.videoCountDelta}`} />
+                <Metric label="总播放变化" value={delta.totalViewsDelta === null ? '–' : `${delta.totalViewsDelta >= 0 ? '+' : ''}${formatInt(delta.totalViewsDelta)}`} />
+              </div>
+              <div className="faint">
+                覆盖 {delta.elapsedMs === null ? '–' : `${Math.round(delta.elapsedMs / 3_600_000)} 小时`}；仅描述差异，不解读原因。
+              </div>
+            </section>
+          )}
 
           {aiText && (
             <section className="card stack">

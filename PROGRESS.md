@@ -1,7 +1,39 @@
-# BiliScope V0.1 进度表
+# BiliScope V0.2 进度表
 
 > 唯一进度表（Single Source of Truth）。
 > 状态：✅ 完成 / 🔄 进行中 / ⏸ 阻塞 / ⬜ 未开始
+
+---
+
+## V0.2.0 大版本升级（评论深度 / 研究能力 / 任务系统 / 灵感闭环）
+
+> 目标：从「能采集」走向「能研究」。批处理 + 并行任务组（A–G）+ 分阶段统一验收；
+> 不删 DB、不重装依赖、不删 pnpm-lock、不重 init git、不做无关架构重构、不削弱断言、不伪造真实 B 站成功。
+
+| Group | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **A** | 评论游标分页 + 楼中楼 + 字段升级 + 环境受限区分 | ✅ | Dexie v2 schema（移除陈旧 `memberId` 索引）；`/x/v2/reply/wbi/main` 游标翻页（`pagination_reply.next_offset`/`is_end`/`all_count`）；`mode=2` 时间 / `mode=3` 热度；`/x/v2/reply/reply` 楼中楼；**删除硬编码 `pn<=3`**；`CollectorErr.diagnostics`；0 条且环境受限 → `ok:false` |
+| **B** | 视频时序快照 + 检查点调度 | ✅ | `analytics.ts` 纯函数：6 检查点（首次/6h/24h/48h/7d/30d）+ Voronoi 最近邻归点；`dueSnapshotCheckpoints()` 决定是否写快照；单视频快照失败不中断批次 |
+| **C** | 账号研究 + 雷达生态 | ✅ | `creator-research.ts`：内容结构 / 内容变化 / 突破视频检测 / 雷达关键词描述；creator-page + radar-page 接入 |
+| **D** | 灵感闭环（热点→灵感→实验） | ✅ | `idea-loop.ts`：`sourceRef` / `ideaId` 来源回溯；9 状态显式白名单状态机；`IdeaStatus` 增 `reviewing`/`archived` |
+| **E** | 研究 UI（评论 / 账号 / 雷达 / 我的数据 / 热点） | ✅ | 评论页 P0-E 统计表 + 排序/分级/深度 + 诊断行 + AI「推测」分区标注；热点页「转为灵感」+ 风险提示；我的数据接入 `runTask`；`warn`/`error`/`ok` CSS |
+| **F** | 评论 AI 分析（事实 / 推断分离） | ✅ | `comment-prep.ts`：清洗→去重→统计→构造上下文；prompt 携带独立 `facts` + `sample`（带 rpid）；system 强制 rpid 引用 + 不得编造数字 |
+| **G** | 任务 / 进度系统 | ✅ | `task-runner.ts`：`runTask` 统一包装；`classifyFailure` 区分环境受限；UI「任务」页（3s 自动刷新、进行中/环境受限/总数计数）；nav + vite 注册 |
+
+### 门禁（V0.2.0）
+
+| 命令 | 结果 | 证据 |
+|---|---|---|
+| `tsc --noEmit` | ✅ EXIT=0 | — |
+| `eslint` | ✅ EXIT=0 | 0 error / 0 warning |
+| `vitest run` | ✅ **201 passed / 1 skipped（27 files）** | 1 个 `RUN_REAL_E2E` 门控真实用例 |
+| `vite build` | ✅ OK | 见下方最终门禁 |
+| `scan-secrets` | ✅ 0 leaks | — |
+| `verify-acceptance` | ✅ TEST 001-009 PASSED | — |
+| `git status` → commit → push → CI | ⬜ 本轮最后执行 | **单个分组提交**（非逐模块） |
+
+> **门禁顺序固定**：typecheck → test → lint → build → secret-scan → acceptance → git status → commit → push → CI。
+> **结论分级**（最终报告不合并）：OFFLINE PASS / INTEGRATION PASS / REAL API PASS / REAL API ENVIRONMENT LIMITED / CHROME E2E PASS。
 
 ---
 

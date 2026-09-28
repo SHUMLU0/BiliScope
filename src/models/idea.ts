@@ -4,11 +4,13 @@ import { isoString, nonEmpty, urlLike } from './common';
 export const ideaStatusEnum = z.enum([
   'idea',
   'researching',
+  'reviewing',
   'ready',
   'producing',
   'published',
   'verified',
   'discarded',
+  'archived',
 ]);
 
 export type IdeaStatus = z.infer<typeof ideaStatusEnum>;
@@ -21,6 +23,14 @@ export const ideaSchema = z.object({
   content: z.string().max(20_000).default(''),
   tags: z.array(z.string().max(40)).max(20).default([]),
   source: sourceEnum.default('manual'),
+  /** 来源追踪（V0.2 · P1-D）：热点转灵感时记录来源 HotTopic 的 id 与标题，便于回溯「这个想法从哪来」 */
+  sourceRef: z
+    .object({
+      kind: z.enum(['hot-topic', 'comment', 'manual']),
+      refId: z.string().max(200).default(''),
+      refLabel: z.string().max(200).default(''),
+    })
+    .optional(),
   status: ideaStatusEnum.default('idea'),
   notes: z.string().max(5000).default(''),
   createdAt: isoString,
@@ -50,6 +60,8 @@ export const experimentSchema = z.object({
   hypothesis: nonEmpty.max(2000),
   targetAccount: z.string().max(100).default(''),
   topic: z.string().max(100).default(''),
+  /** V0.2 · P1-D：关联的 Idea（想法 → 实验闭环） */
+  ideaId: z.string().max(200).default(''),
   videoIds: z.array(z.string()).max(50).default([]),
   expectedResult: z.string().max(2000).default(''),
   actualResult: z.string().max(2000).default(''),

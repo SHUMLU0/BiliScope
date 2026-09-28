@@ -1,6 +1,59 @@
-# FINAL_AUDIT.md — BiliScope V0.1 最终审计
+# FINAL_AUDIT.md — BiliScope V0.2 最终审计
 
-> 生成于 2026-09-28 · 当前版本 **V0.1.4**（V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → **V0.1.4 数据迁移修复：videoRepo.upsertByBvid 业务字段比较**）· **本地全门禁通过 + CI 绿色** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-28 · 当前版本 **V0.2.0**（大版本升级：评论深度 / 研究能力 / 任务系统 / 灵感闭环）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
+>
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → **V0.2.0 研究能力升级**
+
+---
+
+## 0-quinquies. V0.2.0 大版本升级（分组 A–G · 批处理执行）
+
+> 目标：从「能采集」走向「能研究」。**批处理 + 并行任务组（A–G）+ 分阶段统一验收**，不做「任务→报告→任务→报告」。
+> 硬约束：不删 DB、不重装依赖、不删 `pnpm-lock.yaml`、不重 init git、不做无关架构重构、**不削弱断言以通过测试**、**绝不伪造真实 B 站成功**。
+
+### 分组完成情况
+
+| Group | 范围 | 状态 | 关键实现 |
+|---|---|---|---|
+| **A** | 评论游标分页 + 楼中楼 + 字段升级 + 环境受限区分 | ✅ | Dexie **v2 schema** 修复陈旧索引（移除 `memberId`）；`/x/v2/reply/wbi/main` 真游标（`pagination_reply.next_offset` 可 `null`、`is_end`、`all_count`）；`mode=2` 时间 / `mode=3` 热度；`/x/v2/reply/reply` 楼中楼（`rootRpid`/`parentRpid`/`replyLevel`）；**删除硬编码 `pn<=3`**；`CollectorErr` 加 `diagnostics`；**0 条且环境受限 → `ok:false`（不再显示「采集完成 0 条」）** |
+| **B** | 视频时序快照 + 检查点调度 | ✅ | 新增 `src/services/analytics.ts`（纯函数，无 Dexie/无网络）：`VIDEO_SNAPSHOT_CHECKPOINTS`（首次/6h/24h/48h/7d/30d）、`selectSnapshotPoints`（Voronoi 最近邻归点）、`computeSnapshotGrowth`、`computeCommentStats`、`countKeywords`、`topComments`；`video-collector` 新增 `dueSnapshotCheckpoints(firstTs, existingTs, nowIso)`，仅当有到期检查点才写快照；单视频快照失败不中断批次 |
+| **C** | 账号研究 + 雷达生态 | ✅ | 新增 `src/services/creator-research.ts`：`creatorContentStructure`（分区/时长分布、Top 标签、发布时段）、`creatorContentChange`（前/后半段对比：分区迁移、平均时长差、30 天发布速率）、`detectBreakoutVideos`（≥ 中位数 2×，最少 5 样本）、`radarKeywordSummary`（仅描述性）、`creatorTimelineSummary`、`creatorFacts` |
+| **D** | 灵感闭环（热点→灵感→实验） | ✅ | 新增 `src/services/idea-loop.ts`：`IDEA_TRANSITIONS` 显式白名单状态机（9 状态）、`canTransition`、`hotTopicToIdea`（记录 `sourceRef`）、`ideaToExperiment`（关联 `ideaId`）、`transitionIdea`（非法跳转抛错）；`IdeaStatus` 增 `reviewing`/`archived`；`experimentSchema` 增 `ideaId` |
+| **E** | 研究 UI（评论 / 账号 / 雷达 / 我的数据 / 热点 / 任务） | ✅ | 评论页 P0-E 统计表（总量/已采/顶层/楼中楼/平均点赞/最高点赞/回复率/时间跨度）+ 排序（点赞/时间/回复）+ 关键词过滤 + Top5 评论 + 关键词 + 诊断行；**AI 段标注「推测，须与统计事实对照」**；账号页新增「内容结构/内容变化/突破视频/账号变化」；雷达页新增关键词描述段；热点页新增「转为灵感」+ 风险提示；我的数据接入 `runTask`；`global.css` 补 `warn`/`error`/`ok` |
+| **F** | 评论 AI 分析（事实 / 推断分离） | ✅ | 新增 `src/services/comment-prep.ts`：`prepareCommentAnalysis`（清洗→去重[`rpidStr` AND `uname#content`]→统计[基于原始评论]→关键词/Top→按点赞/时间采样并标注 truncated）；`serializeCommentFacts`（仅事实 JSON）；`buildCommentAnalyzePrompt` 携带**独立的 `facts` 段 + 带 `rpid` 的 `sample` 段**；system 强制「引用 rpid + facts 段不得编造数字」 |
+| **G** | 任务 / 进度系统 | ✅ | 新增 `src/services/task-runner.ts`：`createTask`/`markRunning`/`updateProgress`/`cancelTask`；`runTask` 统一包装（成功→`success`，环境受限但有数据→`partial`，失败→`failed`，抛错→捕获为 `failed`）；`classifyFailure` 通过 diagnostics 或正则（`-412|-509|-352|-403|风控|未登录|环境受限`）判定环境受限；UI 新增「任务」页（3s 自动刷新、进行中/环境受限/总记录计数、诊断展示）；`Nav` + `vite.config.ts` 注册 `pages/tasks` |
+
+### 工程与门禁
+
+| 编号 | 级别 | 事项 | 结果 | 验证 |
+|---|---|---|---|---|
+| #1 | P0 | Dexie v2 schema（评论索引修复） | ✅ | `this.version(2).stores({ comments: 'id, videoId, rpidStr, rootRpid, replyLevel, ctime, [videoId+ctime], [videoId+replyLevel]' })`；v1 保留（12 张表） |
+| #2 | P0 | 归一化器真实响应解析 | ✅ | `normalizeCommentPage` 直接解析完整 `{code,data,message}`（不再包一层 `data`）；失败保留真实 `code`/`message`；`next_offset` 允许 `null` |
+| #3 | P0 | `CollectorErr.diagnostics` | ✅ | 环境受限失败携带 httpStatus/biliCode/pages/fetched/stored/environmentLimited |
+| #4 | P1 | 纯函数分析层 | ✅ | `analytics.ts` / `creator-research.ts` / `idea-loop.ts` / `comment-prep.ts` 均无 IO，便于单测 |
+| #5 | P1 | 任务类型扩展 | ✅ | `collectionTaskTypeEnum` 新增 `my-data`（我的数据整链路登记为一个任务） |
+| #6 | P1 | 版本号统一 | ✅ | package.json / manifest.json / CHANGELOG / DEPLOYMENT / FINAL_AUDIT / PROGRESS 全部对齐 **V0.2.0** |
+| — | — | 门禁全绿 | ✅ | typecheck 0 · lint 0 · **`vitest run` 201 passed / 1 skipped（27 files）** · build OK（110 modules）· 0 secrets · TEST 001-009 PASSED |
+
+### 结论分级（本节不合并）
+
+| 层级 | 结果 | 说明 |
+|---|---|---|
+| **OFFLINE PASS** | ✅ | typecheck / lint / 单测（201 passed）/ build / scan-secrets / verify-acceptance 全绿 |
+| **INTEGRATION PASS** | ✅ | Collector→Repository→Dexie 链路在 `verify-acceptance` 中实测落库（TEST 003/004/005/006） |
+| **REAL API PASS** | ⏳ 待低风控环境 | `/x/v2/reply/wbi/main` 等新接口需真实网络复验（1 个 `RUN_REAL_E2E` 门控用例） |
+| **REAL API ENVIRONMENT LIMITED** | ✅ 已正确区分 | 无登录态下风控（-352/-412/-509）→ `ok:false` + `environmentLimited`，UI 显示「环境受限」**而非「采集完成 0 条」** |
+| **CHROME E2E PASS** | ⏳ 待手动加载 dist/ | 见下方实机验收清单 |
+
+### 用户关键约束遵守情况
+
+- ✅ **没有**「任务→报告→任务→报告」：分组 A–G 批处理后统一验收。
+- ✅ **没有**重复安装依赖；**没有**删除 `pnpm-lock.yaml`；**没有**重新 init git。
+- ✅ **没有**无关架构重构；**没有**削弱断言以通过测试。
+- ✅ **没有** mock 冒充真实 B 站成功，**没有**伪造「采集完成」。
+- ✅ **没有**清空 DB（保留历史数据，靠 upsert 比较修复）。
+
+> **已知限制**：真实 B 站端到端（评论游标深分页 / 楼中楼）在无 Cookie 的高风控出口下可能被限制，此时明确标注为「环境受限」。`RUN_REAL_E2E=1` 可在低风控环境手动复验。
 
 ---
 

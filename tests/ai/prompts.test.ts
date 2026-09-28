@@ -42,16 +42,23 @@ const video: Video = {
 const comment: Comment = {
   id: 'c1',
   videoId: 'v1',
-  parentId: 0,
   rpid: 1,
-  memberId: 'a'.repeat(32),
-  uname: 'u',
-  content: 'm',
+  rpidStr: '1',
+  mid: 100,
+  midStr: '100',
+  rootRpid: 0,
+  parentRpid: 0,
+  dialog: 1,
+  replyLevel: 1,
   like: 0,
   replyCount: 0,
   ctime: 1700000000,
+  uname: 'u',
+  content: 'm',
   level: 0,
   createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+  source: 'wbi-main',
 };
 
 describe('prompts', () => {

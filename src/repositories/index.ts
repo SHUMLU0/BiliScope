@@ -155,6 +155,12 @@ export const videoSnapshotRepo = {
     if (!all.length) return undefined;
     return all.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))[0];
   },
+  /** V0.2：首个快照（时序基准 = 检查点起算点） */
+  async first(videoId: string): Promise<VideoSnapshot | undefined> {
+    const all = await db.videoSnapshots.where('videoId').equals(videoId).toArray();
+    if (!all.length) return undefined;
+    return all.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1))[0];
+  },
 };
 
 // ─────────────────────────────────────────────────────────── Comment
@@ -246,6 +252,14 @@ export const ideaRepo = {
     if (opts.status) return db.ideas.where('status').equals(opts.status).reverse().sortBy('createdAt');
     return db.ideas.orderBy('createdAt').reverse().toArray();
   },
+  async get(id: string): Promise<Idea | undefined> {
+    return db.ideas.get(id);
+  },
+  /** V0.2 · P1-D：按来源引用反查（热点 → 已生成的灵感） */
+  async listBySourceRef(kind: NonNullable<Idea['sourceRef']>['kind'], refId: string): Promise<Idea[]> {
+    const all = await db.ideas.toArray();
+    return all.filter((i) => i.sourceRef?.kind === kind && i.sourceRef.refId === refId);
+  },
   async updateStatus(id: string, status: Idea['status']): Promise<void> {
     await db.ideas.update(id, { status, updatedAt: ts() });
   },
@@ -262,6 +276,29 @@ export const topicRepo = {
   async list(): Promise<Topic[]> {
     return db.topics.toArray();
   },
+  async get(id: string): Promise<Topic | undefined> {
+    return db.topics.get(id);
+  },
+  async upsertByName(name: string, patch: Partial<Topic> = {}): Promise<string> {
+    const existing = (await db.topics.toArray()).find((t) => t.name === name);
+    if (existing) {
+      await db.topics.update(existing.id, { ...patch, updatedAt: ts() });
+      return existing.id;
+    }
+    const now = ts();
+    const candidate: Topic = {
+      id: `tp_${name}`,
+      name,
+      tags: patch.tags ?? [],
+      source: patch.source ?? '',
+      competitionLevel: patch.competitionLevel ?? 'unknown',
+      notes: patch.notes ?? '',
+      createdAt: now,
+      updatedAt: now,
+    };
+    await db.topics.add(candidate);
+    return candidate.id;
+  },
 };
 
 export const experimentRepo = {
@@ -271,6 +308,17 @@ export const experimentRepo = {
   },
   async list(): Promise<Experiment[]> {
     return db.experiments.orderBy('createdAt').reverse().toArray();
+  },
+  async get(id: string): Promise<Experiment | undefined> {
+    return db.experiments.get(id);
+  },
+  /** V0.2 · P1-D：按想法反查实验（闭环追溯） */
+  async listByIdea(ideaId: string): Promise<Experiment[]> {
+    const all = await db.experiments.toArray();
+    return all.filter((e) => e.ideaId === ideaId);
+  },
+  async update(id: string, patch: Partial<Experiment>): Promise<void> {
+    await db.experiments.update(id, { ...patch, updatedAt: ts() });
   },
 };
 

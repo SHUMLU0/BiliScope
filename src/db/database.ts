@@ -8,6 +8,12 @@
  *
  * 主键：string id（自生成，源类型）
  * 索引：业务键（uid / bvid / videoId / creatorId）+ 时间戳
+ *
+ * 版本说明：
+ *  - v1：初始 12 表
+ *  - v2：评论模型升级（P0-C）。移除无效索引 memberId（模型已无此字段），
+ *        新增 rpidStr / rootRpid / replyLevel 等查询索引，便于按「根评论展开二级回复」
+ *        与「按层级筛选一级评论」查询。
  */
 
 import Dexie, { type Table } from 'dexie';
@@ -55,6 +61,11 @@ export class BiliScopeDB extends Dexie {
       experiments: 'id, status, createdAt',
       collectionTasks: 'id, type, status, targetId, createdAt',
       aiAnalyses: 'id, type, targetId, provider, createdAt',
+    });
+    // V0.2 · P0-C：评论模型升级。只改 comments 表的索引，其余表沿用 v1。
+    this.version(2).stores({
+      comments:
+        'id, videoId, rpidStr, rootRpid, replyLevel, ctime, [videoId+ctime], [videoId+replyLevel]',
     });
   }
 }

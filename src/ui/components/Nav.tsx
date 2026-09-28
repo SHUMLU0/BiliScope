@@ -17,6 +17,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: 'my.html', label: '我的数据' },
   { href: 'hot.html', label: '热点' },
   { href: 'idea.html', label: '灵感' },
+  { href: 'tasks.html', label: '任务' },
 ];
 
 export function Nav({ active }: { active: string }): ReactNode {

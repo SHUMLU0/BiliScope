@@ -24,6 +24,40 @@
 - GitHub 仓库推送因当前环境无 `gh` CLI / 无 git credential，未自动执行。
 - Gemini Adapter 实现但 V0.1 不测试（环境无 Key）。
 
+## [V0.2.0] - 2026-09-28
+
+大版本升级：从「能采集」走向「能研究」。核心是把评论、视频、账号三条数据链路做深，并补上任务系统、灵感闭环与研究结论的「事实 / 推断分离」。
+
+### P0 — 数据链路深度（V0.1 遗留的真实缺口）
+
+- **P0-A 评论游标分页**：顶层评论改用 `/x/v2/reply/wbi/main`，真正使用 `cursor.pagination_reply.next_offset` / `cursor.is_end` / `cursor.all_count` 翻页；`mode=2` 按时间 / `mode=3` 按热度。**移除硬编码 `pn<=3`**。
+- **P0-B 楼中楼采集**：新增 `/x/v2/reply/reply?type=1&oid&root&pn&ps=`，深度模式展开 Top N（deep=30 / advanced=100）条顶层评论的二级回复；完整保留 `rootRpid` / `parentRpid` / `replyLevel`。
+- **P0-C 评论字段升级**：优先使用字符串 ID（`rpidStr` / `midStr`），补全 `root` / `parent` / `dialog` / `like` / `replyCount` / `ctime` / `uname` / `content` / `level`；可选 `sex` / `vipStatus` / `location`。
+- **P0-D 「真的 N 条」vs「被风控限制的 N 条」**：采集失败带 `diagnostics`（httpStatus / biliCode / pages / fetched / stored / environmentLimited）。**当 0 条且环境受限时返回 `ok:false`，绝不显示「采集完成 0 条」**。
+- **P0-E 评论研究 UI**：总量 / 已采 / 顶层 / 楼中楼 / 平均点赞 / 最高点赞 / 回复率 / 时间跨度；按点赞、时间、回复数排序 + 关键词过滤；Top 评论 / 关键词。
+- **P0-F 评论 AI 分析**：复用既有 Adapter，管线为 采集→清洗→去重→统计→构造上下文→分析；输出事实 / 需求 / 疑问 / 支持 / 反对，**引用具体评论 rpid**，并单独给出不确定性。**统计与 AI 推断在 UI 与提示词上严格分区**。
+
+### P1 — 研究能力
+
+- **视频研究**：`VideoSnapshot` 时序（首次 / 6h / 24h / 48h / 7d / 30d 六个检查点），最近邻归点算法 + 增长计算。
+- **账号研究**：内容结构（分区 / 时长分布、Top 标签、发布时段）、内容变化（前后半段对比：分区迁移、平均时长差、30 天发布速率）、突破视频检测（≥ 中位数 2×，最少 5 个样本）。
+- **雷达**：创作者雷达 + 生态描述（仅描述性统计，不做因果推断）。
+- **灵感闭环**：热点 → 灵感 → 实验三段式，带 `sourceRef` / `ideaId` 来源回溯；灵感状态机为显式白名单（9 状态）。
+- **任务 / 进度系统**：`runTask` 统一包装采集，落 Dexie；UI「任务」页展示状态 / 进度 / 诊断，区分 `success` / `partial`（环境受限但有部分数据）/ `failed`。
+
+### Engineering
+
+- Dexie **v2 schema**：修复评论表陈旧索引（移除已不存在的 `memberId`）。
+- 新增纯函数分析层 `src/services/analytics.ts`（无 Dexie / 无网络，便于单测）。
+- 新增 `src/services/`：`creator-research` / `idea-loop` / `task-runner` / `comment-prep`。
+- 测试：**201 passed / 1 skipped（27 files）**（含 1 个 `RUN_REAL_E2E` 门控的真实接口用例）。
+- 版本号统一：package.json / manifest.json / CHANGELOG / DEPLOYMENT / FINAL_AUDIT / PROGRESS 全部对齐 **V0.2.0**。
+
+### Known limitations
+
+- 无登录态：评论楼中楼 / 深分页在风控环境下可能被限制为「环境受限」，此时明确标注而非伪造成功。
+- 真实 B 站端到端需低风控环境，CI 中默认跳过。
+
 ## [V0.1.4] - 2026-09-28
 
 Chrome 实机（影视飓风）在 V0.1.3 修复归一化后**仍**显示视频「全部 0s / 当天日期」。根因是**数据迁移失败**：`videoRepo.upsertByBvid()` 只比较 `title + tags.length` 就返回 `unchanged`，历史脏记录无法被重新采集自愈。

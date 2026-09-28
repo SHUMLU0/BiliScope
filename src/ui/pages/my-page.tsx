@@ -3,9 +3,9 @@ import { Nav } from '../components/Nav';
 import { CreatorCollector } from '@collectors/creator-collector';
 import { VideoCollector } from '@collectors/video-collector';
 import { creatorRepo, videoRepo, videoSnapshotRepo } from '@repositories/index';
+import { runTask } from '@services/task-runner';
 import { formatInt } from '@utils/time';
 import type { Creator, Video, VideoSnapshot } from '@models/index';
-
 const creatorC = new CreatorCollector();
 const videoC = new VideoCollector();
 
@@ -42,15 +42,37 @@ export function MyDataPage() {
       return;
     }
     setStatus('采集中…');
-    const cr = await creatorC.collect({ targetId: uid });
-    if (!cr.ok) {
-      setStatus(`失败：${cr.error}`);
-      return;
-    }
-    setCreator(cr.data[0] ?? null);
-    const vr = await videoC.collectByCreator(Number(uid));
-    if (!vr.ok) {
-      setStatus(`视频失败：${vr.error}`);
+    // Group G：整条链路登记为一个任务，失败/环境受限在「任务」页可见
+    const task = await runTask<Creator | null>(
+      'my-data',
+      uid,
+      async () => {
+        const cr = await creatorC.collect({ targetId: uid });
+        if (!cr.ok) {
+          // 环境受限（如未登录/风控）不伪装成功
+          return cr;
+        }
+        const vr = await videoC.collectByCreator(Number(uid));
+        if (!vr.ok) {
+          return {
+            ok: false as const,
+            error: `视频失败：${vr.error}`,
+            retryable: vr.retryable,
+            diagnostics: vr.diagnostics,
+          };
+        }
+        return {
+          ok: true as const,
+          data: cr.data[0] ? [cr.data[0]] : [],
+          fetched: cr.fetched,
+          diagnostics: cr.diagnostics ?? vr.diagnostics,
+        };
+      },
+      { meta: { uid } },
+    );
+
+    if (task.status === 'failed') {
+      setStatus(`失败：${task.errorMessage ?? '未知错误'}`);
       return;
     }
     const c = await creatorRepo.findByUid(Number(uid));
@@ -58,6 +80,7 @@ export function MyDataPage() {
       setStatus('未找到本地 creator');
       return;
     }
+    setCreator(c);
     const list = await videoRepo.listByCreator(c.id, { limit: 200 });
     setVideos(list);
     const sn: Record<string, VideoSnapshot[]> = {};
@@ -65,7 +88,8 @@ export function MyDataPage() {
       sn[v.id] = await videoSnapshotRepo.listByVideo(v.id);
     }
     setSnapshots(sn);
-    setStatus(`完成 · ${list.length} 视频`);
+    const suffix = task.status === 'partial' ? '（环境受限，数据可能不完整）' : '';
+    setStatus(`完成 · ${list.length} 视频${suffix}`);
   };
 
   return (
@@ -74,7 +98,9 @@ export function MyDataPage() {
       <Nav active="my.html" />
 
       <section className="card stack">
-        <div className="faint">V0.1 仅支持手动输入 UID；账号绑定在 V0.2 引入。</div>
+        <div className="faint">
+          V0.2 仍以手动输入 UID 为主（不读取登录态）；采集全过程登记为任务，可在「任务」页查看进度与诊断。
+        </div>
         <div className="row">
           <input value={uid} onChange={(e) => handleSaveUid(e.target.value)} placeholder="你的 B 站 UID" />
           <button className="primary" onClick={handleFetch}>

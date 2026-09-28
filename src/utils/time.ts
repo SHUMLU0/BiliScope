@@ -33,3 +33,9 @@ export function formatInt(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return '–';
   return Math.round(n).toLocaleString('en-US');
 }
+
+/** 比例（0–1）格式化为百分比：0.5 -> "50.0%"；缺失 -> "–" */
+export function formatPct(ratio: number | null | undefined, digits = 1): string {
+  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) return '–';
+  return `${(ratio * 100).toFixed(digits)}%`;
+}

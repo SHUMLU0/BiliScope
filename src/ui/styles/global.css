@@ -143,6 +143,21 @@ textarea:focus {
   font-size: 12px;
 }
 
+/* status colors — used by task/comment/creator pages to separate
+   "statistics facts" (ok/muted) from "environment limited / inference" (warn)
+   and hard failures (error). */
+.warn {
+  color: var(--warn, #d08700);
+}
+
+.error {
+  color: var(--danger, #d33);
+}
+
+.ok {
+  color: var(--ok, #1a7f37);
+}
+
 .mono {
   font-family: var(--font-mono);
 }
