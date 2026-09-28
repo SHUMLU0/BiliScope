@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "BiliScope",
+  "version": "0.1.0",
+  "description": "Bilibili creator research + content ecosystem analysis. Local-only data, no auth, no cookies.",
+  "minimum_chrome_version": "120",
+  "action": {
+    "default_title": "BiliScope",
+    "default_popup": "src/ui/popup/index.html",
+    "default_icon": {
+      "16": "extension/icons/icon-16.png",
+      "32": "extension/icons/icon-32.png",
+      "48": "extension/icons/icon-48.png",
+      "128": "extension/icons/icon-128.png"
+    }
+  },
+  "options_ui": {
+    "page": "src/ui/options/index.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://space.bilibili.com/*",
+        "https://www.bilibili.com/video/*",
+        "https://search.bilibili.com/*",
+        "https://www.bilibili.com/search*"
+      ],
+      "js": ["src/content/index.ts"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["storage", "alarms"],
+  "host_permissions": [
+    "https://api.bilibili.com/*",
+    "https://www.bilibili.com/*",
+    "https://space.bilibili.com/*",
+    "https://search.bilibili.com/*"
+  ],
+  "icons": {
+    "16": "extension/icons/icon-16.png",
+    "32": "extension/icons/icon-32.png",
+    "48": "extension/icons/icon-48.png",
+    "128": "extension/icons/icon-128.png"
+  }
+}

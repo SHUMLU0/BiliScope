@@ -1,0 +1,17 @@
+# Auto detect text files and use LF
+* text=auto eol=lf
+
+# Windows batch files need CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.crx binary
+
+# GitHub workflows should use LF even on Windows
+.github/**/* text eol=lf

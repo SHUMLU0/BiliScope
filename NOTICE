@@ -1,0 +1,22 @@
+# NOTICE — 第三方项目复用与参考清单
+
+本项目对以下第三方开源项目进行了**研究 / 参考 / 局部借鉴**。所有最终代码均由本项目独立编写，除非特别声明。
+
+| 项目 | 作者 | URL | License | 复用方式 |
+|---|---|---|---|---|
+| Bili-Insights | dai-hongtao | https://github.com/dai-hongtao/Bili-Insights | MIT（参考） | 仅参考架构、数据结构、采集思路；不复制源码 |
+| YourBili | miaoihan | https://github.com/miaoihan/YourBili | 见 LICENSE 文件 | 参考 Snapshot / 增量采集 / WBI 思路 |
+| BilibiliCrawler | Yi-luo-hua | https://github.com/Yi-luo-hua/BilibiliCrawler | 见 LICENSE 文件 | 参考评论 / 任务流程思路 |
+| bilibili-comment-analyzer | sansan0 | https://github.com/sansan0/bilibili-comment-analyzer | GPL-3.0（**不复制**） | 仅参考功能；不复制代码 |
+| BiliInsight | 2951121599 | https://github.com/2951121599/Bili-Insight | CC BY-NC-SA 4.0（**不复制**） | 仅参考 UI 与产品结构 |
+| bilibili-api-collect | bilibili-plugins | https://github.com/bilibili-plugins/bilibili-api-collect | CC-BY-NC 4.0（**禁止商用复制**） | 仅作为 API 端点参考；不复用文本 |
+
+## 规则
+
+1. 任何 License 不允许商用 / 不允许衍生的项目，仅作研究用途；**不复制源码、不复制文档文本到本项目**。
+2. MIT 项目允许参考其架构 / 数据结构 / 设计思路，但**具体代码逐行重写**，并保留原始项目版权说明于本文件。
+3. 实际未直接 import 的第三方，不在本文件中虚构为依赖。
+
+## 详细审计
+
+见 [`OPEN_SOURCE_AUDIT.md`](./OPEN_SOURCE_AUDIT.md)。
