@@ -19,8 +19,8 @@
 | 8 | P1 | 缓存命中不制造 snapshot | ✅ | 新增 `cachedWithMeta()`；命中时 `fetched=false` 且不写时序快照 |
 | 9 | P1 | HotTopic 按业务键去重 | ✅ | `hotTopicBusinessId(source,title)` = md5 前 16 位；bulkPut 变 upsert；repo 返回真实 `added/updated` |
 | 10 | P1 | Smoke test 从普通 CI 分离 | ✅ | `vitest.config.ts` 排除 `tests/smoke/**`；新增 `vitest.smoke.config.ts` + `pnpm test:smoke`；CI 默认离线 + `scripts/assert-smoke-isolated.mjs` 守卫；smoke 改 `workflow_dispatch` 手动触发 |
-| — | — | 门禁全绿 | ✅ | 135/135 tests · typecheck 0 · lint 0 · build OK · 0 secrets · TEST 001-009 PASSED |
-| — | — | commit + push + CI | ⏸ | 待执行 |
+| — | — | 门禁全绿 | ✅ | 136/136 tests · typecheck 0 · lint 0 · build OK · 0 secrets · TEST 001-009 PASSED |
+| — | — | commit + push + CI | ✅ | commit `737d347`（40 files, +1612/-250）→ Run #36419334471 ✓ 47s，8/8 steps success，smoke job skipped |
 
 ---
 
@@ -102,12 +102,13 @@
 |---|---|
 | `pnpm typecheck` | ✅ EXIT=0 |
 | `pnpm lint` | ✅ EXIT=0 |
-| `pnpm test` | ✅ **135/135 PASS**（21 files，离线、不含 smoke） |
+| `pnpm test` | ✅ **136/136 PASS**（21 files，离线、不含 smoke） |
 | `pnpm test:smoke` | ✅ 4/4 PASS（真实网络，手动执行） |
 | `pnpm build` | ✅ EXIT=0 |
 | `pnpm scan-secrets` | ✅ 0 leaks |
 | `node scripts/assert-smoke-isolated.mjs` | ✅ OK |
 | `pnpm verify-acceptance` | ✅ TEST 001-009 PASSED |
+| `git push → CI` | ✅ Run #36419334471（✓ 47s，8/8 steps success，smoke job skipped），commit `737d347` |
 
 ---
 

@@ -19,9 +19,10 @@
 | #7 | P1 | 评论「本次新增 N 条」用 `r.data.length`（含已存在评论） | `CollectorOk.stats{added,updated,unchanged}`；Comment 页显示「新增 / 已存在 / 抓到」 | `tests/collectors/comment.test.ts`：二次采集 `added=0`、`unchanged=25` |
 | #8 | P1 | 5 分钟缓存命中也写 snapshot，污染时间序列 | 新增 `cachedWithMeta()`；命中时 `fetched=false` 且不写快照 | `tests/collectors/creator.test.ts`：命中后快照数不变，清缓存后再采集才 +1 |
 | #9 | P1 | HotTopic 每次 `newId('ht')` + bulkPut → 刷新一次多一份 | `hotTopicBusinessId(source,title)`（md5 前 16 位）；bulkPut 变 upsert；repo 返回真实 `added/updated` | `tests/normalizers/hot-topic.test.ts` + `tests/collectors/hot-topic.test.ts`：重复采集行数不变、`added=0 / updated=2` |
-| #10 | P1 | smoke test 在 `pnpm test` 里跑 → CI 每次打真实 B 站接口 | `vitest.config.ts` 排除 `tests/smoke/**`；新增 `vitest.smoke.config.ts` + `pnpm test:smoke`；CI 加 `scripts/assert-smoke-isolated.mjs` 守卫；smoke 改 `workflow_dispatch` | `node scripts/assert-smoke-isolated.mjs` ✅；`pnpm test` 135/135 离线 |
+| #10 | P1 | smoke test 在 `pnpm test` 里跑 → CI 每次打真实 B 站接口 | `vitest.config.ts` 排除 `tests/smoke/**`；新增 `vitest.smoke.config.ts` + `pnpm test:smoke`；CI 加 `scripts/assert-smoke-isolated.mjs` 守卫；smoke 改 `workflow_dispatch` | `node scripts/assert-smoke-isolated.mjs` ✅；`pnpm test` 136/136 离线 |
 
-**门禁**：typecheck 0 · lint 0 · `pnpm test` 135/135 · `pnpm test:smoke` 4/4 · build OK · 0 secrets · TEST 001-009 PASSED。
+**门禁**：typecheck 0 · lint 0 · `pnpm test` 136/136 · `pnpm test:smoke` 4/4 · build OK · 0 secrets · TEST 001-009 PASSED。
+**提交与 CI**：commit `737d347`（40 files, +1612/-250）已 push 至 `main`，CI Run #36419334471 ✓ 47s（8/8 steps success，smoke job 按设计 skipped）。
 
 **已知限制（诚实记录）**：WBI 签名的**端到端成功**未能在本机证实。实测：
 `view` 与 `upstat` 返回 `code=0`（网络 / UA / Referer 均正常），但**完全不需要签名的 legacy `/x/space/acc/info` 同样返回 -799 / -352**，
@@ -226,13 +227,13 @@ V0.1 提交后独立验收发现 7 项真实数据链路问题，未要求重构
 |---|---|
 | `pnpm typecheck` | ✅ EXIT=0 |
 | `pnpm lint` | ✅ EXIT=0 |
-| `pnpm test` | ✅ 135 passed (21 files) EXIT=0（离线，不含 smoke） |
+| `pnpm test` | ✅ 136 passed (21 files) EXIT=0（离线，不含 smoke） |
 | `pnpm test:smoke` | ✅ 4 passed（真实网络，手动执行） |
 | `node scripts/assert-smoke-isolated.mjs` | ✅ OK（smoke 未回灌默认测试） |
 | `pnpm build` | ✅ EXIT=0 |
 | `pnpm scan-secrets` | ✅ 0 leaks |
 | `pnpm verify-acceptance` | ✅ TEST 001-009 PASSED（010/011 deferred） |
-| `git push → CI` | ⏸ 见下方 V0.1.1 行 / 本轮 commit 后更新 |
+| `git push → CI` | ✅ commit `737d347` → `https://github.com/SHUMLU0/BiliScope/actions/runs/36419334471` ✓ 47s（8/8 steps success，smoke job skipped） |
 
 ### V0.1.1（上一轮）
 
