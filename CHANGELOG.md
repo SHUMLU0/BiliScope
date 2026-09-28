@@ -57,6 +57,14 @@
 `AI-ERROR-002`（429 → REQUEST_RATE_LIMITED）、`UI-ORDER-001`（AI 报告先于统计事实，以 dist 为准）、
 `DOC-001`（README 不再以 V0.1/V0.2/V0.3 为当前版本）、`DOC-002`（README 本地链接全部有效）。
 
+### CI
+
+- 修复发布期发现的 CI 假失败：`UI-ORDER-001` 依赖 `dist/` 构建产物，而 CI 的「Unit tests (offline)」
+  步骤运行在 Build 之前，导致硬断言失败。现改为「默认优雅跳过 + `UI_ORDER_STRICT=1` 严格模式」双形态，
+  并新增 `pnpm test:dist`（无 dist 时**主动失败**，避免「跳过」冒充「通过」）；`ci.yml` 在 Build 后
+  新增 `UI order acceptance (dist, strict)` 步骤，使 dist 区序验收在 CI 中真实执行。
+
+
 ## [V3.0.0] - 2026-09-28
 
 **「可验证 AI 分析系统」**：不是重写，而是在已验证的 V0.2.2 采集底座之上**重建 AI 层**。

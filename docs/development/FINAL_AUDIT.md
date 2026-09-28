@@ -30,6 +30,27 @@
 - AI 输入预算可估算并在 UI 显示；超阈值时建议降低样本量而非直接失败。
 - 仓库 markdown **0 死链接**；版本号六处对齐 `3.0.1`。
 
+### 发布期 CI 缺陷（第 7 个真实缺陷，发现即修复）
+
+| # | 缺陷 | 根因 | 修复 | 提交 |
+|---|---|---|---|---|
+| CI-1 | V3.0.1 首推（`0da8cbe`）CI 在「Unit tests (offline)」**假失败** | 该 CI 步骤跑在 `Build (CRX)` **之前**，`dist/` 不存在；而 `tests/ui/ui-order.test.ts` 第 1 个用例硬断言 `expect(distReady).toBe(true)` → `expected false to be true` | 该用例改 `it.skipIf(!STRICT)`、另两例改 `it.skipIf(!distReady)`：无 dist **优雅跳过**；新增 `UI_ORDER_STRICT=1` 严格模式 + `scripts/test-dist.mjs`（`pnpm test:dist`，无 dist 时**主动失败**，绝不让「跳过」冒充「通过」）；`ci.yml` 在 Build 后新增 `UI order acceptance (dist, strict)` 步骤 | `687bcd9` |
+
+**教训**：依赖构建产物的验收用例不得放在构建步骤之前，也不得在 CI 中以硬断言要求产物存在——两种正确形态是「默认跳过 + 显式严格模式强制断言」，二者缺一不可。
+
+### 门禁实测结果（本地 + CI，2026-09-28）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| typecheck | `tsc --noEmit`（含正控制验证） | **PASS**（EXIT=0 / 输出 0 字节） |
+| lint | `eslint . --ext .ts,.tsx` | **PASS**（0 error / 9 warning，均为 `scripts/` 的 CLI `console`） |
+| test | `vitest run` | **PASS** 348 passed / 2 skipped / 0 failed |
+| build | `vite build` | **PASS**（`comment-C4_muNIS.js` 等产物齐备） |
+| dist 区序验收 | `pnpm test:dist`（严格模式） | **PASS**（3 passed，以 dist 断言） |
+| secret scan | `node scripts/scan-secrets.mjs` | **PASS**（no secrets detected） |
+| acceptance | `tsx scripts/verify-acceptance.ts` | **PASS** TEST 001-009（010/011 deferred） |
+| CI | GitHub Actions `verify` | **PASS**（`687bcd9` concl=success） |
+
 ### 真实性边界（本审计不粉饰）
 
 - Real Provider E2E：依赖使用者本地 API Key，仓库内自动化测试使用 **mock fetch** → 报告为 **REAL AI ENVIRONMENT LIMITED**，**不得**当作 `REAL AI PASS`。
