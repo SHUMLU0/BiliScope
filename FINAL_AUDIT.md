@@ -1,6 +1,6 @@
 # FINAL_AUDIT.md — BiliScope V0.1 最终审计
 
-> 生成于 2026-09-28 · V0.1.0 · 本地全门禁通过；CI 由 GitHub Actions 在 push 后首次运行。
+> 生成于 2026-09-28 · V0.1.0 · **本地全门禁通过 + CI 绿色（Run #36411153975）** · GitHub: https://github.com/SHUMLU0/BiliScope
 
 ---
 
@@ -67,17 +67,19 @@
 | TEST 007 | 数据查询 → 可以按时间查看 | ✅ PASS（n=2, monotonic=true） |
 | TEST 008 | AI 连接测试 → 能成功调用配置模型 | ✅ PASS（aiAnalyze / aiTestConnection 已实现，单元测试覆盖 happy/401/connection failure） |
 | TEST 009 | AI 分析失败 → 不会产生假结果 | ✅ PASS（OpenAICompatibleAdapter.analyze throws on non-2xx，无 fallback，无空文本写入） |
-| TEST 010 | git status 干净 | ⏸ 将在 commit 之后立即最终验证 |
-| TEST 011 | CI 绿色 | ⏸ push 后由 GitHub Actions 验证 |
+| TEST 010 | git status 干净 | ✅ PASS（commit 后立即检查，git status --short 为空） |
+| TEST 011 | CI 绿色 | ✅ PASS（GitHub Actions Run #36411153975，1m4s，✓ main CI · verify） |
 
 ---
 
 ## 3. GitHub
 
 - 仓库名：**BiliScope**
-- 类型：Private
-- 推送：在所有本地门禁通过后由 `gh repo create --source=. --remote=origin --push` 执行
-- **若 gh 不可用**：降级为本地仓库完成 + 文档明确说明，最终用户自行 `git remote add origin <url> && git push -u origin main`
+- 类型：**Private**
+- URL：https://github.com/SHUMLU0/BiliScope
+- 本地提交：`9a1f248 chore: initial commit (BiliScope V0.1)` — 116 文件 / 12,281 insertions
+- CI：✅ GitHub Actions Run #36411153975（1m4s，✓ verify）
+- 产物：biliscope-dist artifact 已上传
 
 ---
 
@@ -169,4 +171,4 @@
 | `pnpm build` | ✅ EXIT=0（59 files in dist/） |
 | `pnpm scan-secrets` | ✅ 0 leaks |
 | `pnpm verify-acceptance` | ✅ TEST 001-009 PASSED（010/011 deferred） |
-| `git push → CI` | ⏸ 本地无 gh CLI，由 GitHub Actions 在 push 后首次运行 |
+| `git push → CI` | ✅ `https://github.com/SHUMLU0/BiliScope/actions/runs/36411153975` ✓ 1m4s |
