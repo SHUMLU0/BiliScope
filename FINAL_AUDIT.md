@@ -1,8 +1,88 @@
-# FINAL_AUDIT.md — BiliScope V0.2 最终审计
+# FINAL_AUDIT.md — BiliScope V0.2.1 最终审计
 
-> 生成于 2026-09-28 · 当前版本 **V0.2.0**（大版本升级：评论深度 / 研究能力 / 任务系统 / 灵感闭环）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-28 · 当前版本 **V0.2.1**（评论采集真实性修复：`pagination_str` 协议 + 翻页不变量 + 跨页去重）· **本地全门禁通过 · 真实 API PASS** · GitHub: https://github.com/SHUMLU0/BiliScope
 >
-> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → **V0.2.0 研究能力升级**
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → **V0.2.1 评论采集真实性修复**
+
+---
+
+## 0-sexies. V0.2.1 评论采集真实性修复（P0 数据链路）
+
+> 触发：真实 Chrome 打开 `BV17u411E7UK` 只能取到**极少量评论**；一级/二级分页协议与真实接口不符。
+> 目标：对齐真实协议 → 补翻页不变量 → 跨页去重 → 真实接口验证。**绝不用 mock 冒充真实成功**。
+
+### 根因（一句话）
+
+一级分页参数写成了 **`pagination_reply`**（该参数在真实协议中不存在），正确参数是 **`pagination_str`**（值为 `{"offset":"<上一页 next_offset>"}`，其中 `next_offset` 本身是 JSON 字符串）。参数名错 → 服务端只回第一页 → 表现为「只能拿到极少量评论」。
+
+### 修复清单
+
+| 编号 | 级别 | 问题 | 修复 | 验证 |
+|---|---|---|---|---|
+| P0-1 | P0 | 一级分页 URL 参数用错（`pagination_reply`） | 新增 `buildCommentMainQuery({aid,mode,paginationOffset})` 统一构造 `oid/type=1/mode/pagination_str/plat=1/seek_rpid=''/web_location=1315875`；新增 `firstPagePaginationStr()` / `nextPagePaginationStr()`；**删除** `pagination_reply` 参数 | `P0-1 协议构造` 5 测试（含 `expect(sp.has('pagination_reply')).toBe(false)`） |
+| P0-2 | P0 | 一级测试断言错误（读 `pagination_reply`） | 重写：验证第 1 页 `next_offset=A` → 第 2 次请求带 `pagination_str` 且含 A → 第 2 页 rpid 不同 → 唯一数正确 | 测试断言 URL 序列 + offset 传递，而非只看 `data.length` |
+| P0-3 | P0 | 无翻页不变量（会反复烧请求 / 重复填档） | 维护 `previousOffset`/`currentOffset`/`seenRpidStr`：① offset 重复 → 停 + `paginationStalled`；② 本页唯一新增 0 → 停；③ 连续两页 rpid 集合相同 → 停 + `duplicatePageDetected`；④ `is_end` → 正常结束；⑤ tierLimit → 正常结束；⑥ maxPages → `partial` | stalled / duplicate-page / maxPages 用例；日志如 `pages=2 fetched=6 unique=3 duplicatePage=true` |
+| P0-4 | P0 | 无跨页去重，`fetched` 与 `unique` 混同 | Collector 进程级 `seenRpidStr` 跳过已见 `rpidStr`；`fetched`（原始）/`unique`（去重）分离 | P0-4 用例：`fetched=20 unique=15`（第 2 页部分重叠） |
+| P0-5 | P0 | 二级回复错用一级游标逻辑 | `collectSubReplies` 改 `pn` 递增 + `ps=20`；**不读** `pagination_reply.next_offset`；末页判据 `replies.length < ps` | pn=[1,2,3] / sub=47(20+20+7) → 二级 23 条；重复 rpid 去重用例 |
+| P0-6 | P0 | 无真实响应 fixture | 新增 4 个真实结构 fixture（main page1/page2、reply page1/page2），覆盖 `rpid/rpid_str/mid/mid_str/parent/root/dialog/rcount/like/ctime/member/content/cursor/pagination_reply.next_offset` | fixture 全链路用例：`response → normalizer → collector → repository → Dexie` |
+| P0-7 | P0 | 无真实链路证据 | E2E：先取真实 `aid`，再 `standard=200/depth=top/sort=time` | **`REAL_API_PASS`**（见下表） |
+| P1-8 | P1 | JS Number 精度可能误合并评论 | 保留 `rpid`/`mid` 兼容字段，Repository 去重/索引/关系键优先 `rpidStr`/`midStr`/`rootRpidStr`/`parentRpidStr`/`dialogStr`；Dexie **v3 schema** 新增索引 | 大 `rpidStr` 用例：`Number(big1)===Number(big2)` 但必须落 2 行 |
+| P1-9 | P1 | 互动字段变化被忽略 / `createdAt` 被覆盖 | 静态字段同 → `unchanged`；`like/replyCount/location/vipStatus` 变 → `updated` 且保留 `id`/`createdAt` | 3 条 P1-9 用例 |
+| P1-10 | P1 | 缺失字段伪装成 0 | `num()` 区分真实 0 / 缺失 `null` / 失败 unknown；UI `null` → `—` | 缺失 `location` → `undefined` 用例 |
+
+### 真实链路验收（P0-7 · 与工程门禁分开记录）
+
+```
+[REAL E2E] {"ok":true,
+  "stats":{"added":200,"updated":0,"unchanged":0,"pages":10,
+           "expectedTotal":11695,"fetched":200,"unique":200},
+  "diagnostics":{"pages":10,"fetched":200,"stored":200,"biliCode":0,
+                 "paginationAdvanced":true}}
+```
+
+| 指标 | 实测值 |
+|---|---|
+| 视频 / aid | `BV17u411E7UK` / `532669355`（真实 view API 取回） |
+| HTTP / 业务码 | `200` / `code=0`（无风控） |
+| 页数 | **10** |
+| 声明总数 `expectedTotal` | 11695 |
+| 原始抓取 `fetched` | 200 |
+| **唯一入库 `unique`** | **200**（`fetched === unique`，零重复） |
+| `paginationAdvanced` | **true** |
+| `environmentLimited` | false |
+| 耗时 | 1.77s（串行翻页） |
+| **判定** | **`REAL_API_PASS`** |
+
+> 修复前只能取到个位数评论；修复后连翻 10 页取满 200 条且每条唯一 —— 证明 `pagination_str` 协议与翻页不变量均正确生效。
+
+### 工程门禁（与真实链路**不合并**）
+
+| 项 | 结果 |
+|---|---|
+| typecheck | ✅ 0 errors |
+| lint | ✅ 0 problems |
+| test | ✅ **224 passed / 1 skipped（27 files）**（评论链路 36 passed） |
+| build | ✅ OK（110 modules · 4.09s） |
+| scan-secrets | ✅ no secrets detected |
+| verify-acceptance | ✅ TEST 001-009 PASSED（010/011 延后至 commit/push 后） |
+
+### 结论分级（本节不合并）
+
+| 层级 | 结果 | 说明 |
+|---|---|---|
+| **OFFLINE PASS** | ✅ | typecheck / lint / 单测（224 passed）/ build / scan-secrets / verify-acceptance 全绿 |
+| **INTEGRATION PASS** | ✅ | Collector→Repository→Dexie 链路实测落库（TEST 003/004/005/006）+ 4 个真实 fixture 全链路用例 |
+| **REAL API PASS** | ✅ **本次达成** | `BV17u411E7UK`：pages=10 / fetched=200 / unique=200 / paginationAdvanced=true |
+| **REAL API ENV LIMIT** | ✅ 已正确区分 | 风控（-352/-412/-509）→ `ok:false` + `environmentLimited`，绝不谎称成功 |
+| **CHROME E2E PASS** | ⏳ 待手动加载 `dist/` | 见实机验收清单 |
+
+### 用户关键约束遵守情况
+
+- ✅ **没有**「任务→报告→任务→报告」：读 → TODO → 协议核对 → P0 批量修 → 批量测 → 一次性回归 → 真实 smoke → 终检。
+- ✅ **没有**重装依赖；**没有**删 `pnpm-lock.yaml`；**没有**重新 init git。
+- ✅ **没有**无关架构重构 / UI 重构；**没有**削弱断言以通过测试。
+- ✅ **没有** mock 冒充真实 B 站成功，**没有**伪造「采集完成」。
+- ✅ 顺带修复测试基建缺陷（`globalThis.fetch` 不被 `vi.restoreAllMocks()` 还原导致 E2E 被污染）。
 
 ---
 

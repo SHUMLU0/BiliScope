@@ -1,0 +1,15 @@
+{
+  "_source": "GET /x/v2/reply/reply (query: oid, type=1, root=<rpid>, pn=2, ps=20)",
+  "_note": "二级回复末页真实响应结构：replies.length(3) < ps(20) → 采集结束。仍是 pn 页码分页，无 cursor。",
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "page": { "num": 2, "size": 20, "count": 23 },
+    "replies": [
+      { "rpid": 1600000021, "rpid_str": "16000000021", "root": 1500000002, "root_str": "15000000002", "parent": 1500000002, "parent_str": "15000000002", "dialog": 1500000002, "dialog_str": "15000000002", "rcount": 0, "like": 0, "ctime": 1735100021, "mid": 800000021, "mid_str": "80000000021", "member": { "mid": "80000000021", "uname": "回复者21", "level_info": { "current_level": 2 }, "vip": {} }, "content": { "message": "末页第 1 条" }, "reply_control": { "location": "IP属地：北京" } },
+      { "rpid": 1600000022, "rpid_str": "16000000022", "root": 1500000002, "root_str": "15000000002", "parent": 1500000002, "parent_str": "15000000002", "dialog": 1500000002, "dialog_str": "15000000002", "rcount": 0, "like": 0, "ctime": 1735100022, "mid": 800000022, "mid_str": "80000000022", "member": { "mid": "80000000022", "uname": "回复者22", "level_info": { "current_level": 1 }, "vip": {} }, "content": { "message": "末页第 2 条" }, "reply_control": { "location": "IP属地：上海" } },
+      { "rpid": 1600000023, "rpid_str": "16000000023", "root": 1500000002, "root_str": "15000000002", "parent": 1500000002, "parent_str": "15000000002", "dialog": 1500000002, "dialog_str": "15000000002", "rcount": 0, "like": 0, "ctime": 1735100023, "mid": 800000023, "mid_str": "80000000023", "member": { "mid": "80000000023", "uname": "回复者23", "level_info": { "current_level": 3 }, "vip": {} }, "content": { "message": "末页第 3 条，总计 23 条" }, "reply_control": { "location": "IP属地：广东" } }
+    ]
+  }
+}

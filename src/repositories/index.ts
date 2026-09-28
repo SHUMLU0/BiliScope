@@ -165,7 +165,41 @@ export const videoSnapshotRepo = {
 
 // ─────────────────────────────────────────────────────────── Comment
 
+/**
+ * V0.2.1（P1-9）：判断一条 Comment 的**业务字段**是否变化。
+ *  - 静态字段（rpid/ctime/uname/content/replyLevel/关系键）变化 → 视为变化。
+ *  - 互动字段（like / replyCount / location / vipStatus / sex / level）变化 → 视为变化，
+ *    否则「已存在即 unchanged」会让点赞数、回复数永远停留在首次采集值。
+ */
+function commentBusinessChanged(a: Comment, b: Comment): boolean {
+  return (
+    a.rpidStr !== b.rpidStr ||
+    a.midStr !== b.midStr ||
+    a.rootRpidStr !== b.rootRpidStr ||
+    a.parentRpidStr !== b.parentRpidStr ||
+    a.dialogStr !== b.dialogStr ||
+    a.replyLevel !== b.replyLevel ||
+    a.ctime !== b.ctime ||
+    a.uname !== b.uname ||
+    a.content !== b.content ||
+    a.level !== b.level ||
+    a.like !== b.like ||
+    a.replyCount !== b.replyCount ||
+    a.location !== b.location ||
+    a.vipStatus !== b.vipStatus ||
+    a.sex !== b.sex
+  );
+}
+
 export const commentRepo = {
+  /**
+   * V0.2.1（P1-8 / P1-9）：
+   *  - 去重键用 **`videoId#rpidStr`**（字符串），不再用 `rpid` 数字——
+   *    大 rpid 超出 Number 安全整数范围时会被压成同一个值，导致两条不同评论被判为同一条。
+   *  - 已存在的评论：比较**业务字段**（like / replyCount / location / vipStatus / content 等），
+   *    有变化 → `updated`（保留主键与 createdAt，刷新 updatedAt）；无变化 → `unchanged`。
+   *    旧的「存在即 unchanged」会让互动数据（点赞/回复数）永远不刷新。
+   */
   async bulkAdd(comments: Comment[]): Promise<UpsertResult> {
     if (!comments.length) return { added: 0, updated: 0, unchanged: 0, ids: [] };
     const videoIds = new Set<string>();
@@ -175,24 +209,37 @@ export const commentRepo = {
       .anyOf(Array.from(videoIds))
       .toArray();
     const existMap = new Map<string, Comment>();
-    for (const e of allExisting) existMap.set(`${e.videoId}#${e.rpid}`, e);
+    for (const e of allExisting) existMap.set(`${e.videoId}#${e.rpidStr}`, e);
 
     const toAdd: Comment[] = [];
+    let updated = 0;
     let unchanged = 0;
     for (const c of comments) {
-      const key = `${c.videoId}#${c.rpid}`;
-      if (existMap.has(key)) {
-        unchanged++;
-      } else {
+      const key = `${c.videoId}#${c.rpidStr}`;
+      const existing = existMap.get(key);
+      if (!existing) {
         toAdd.push(c);
+        continue;
+      }
+      if (commentBusinessChanged(existing, c)) {
+        // 保留主键与首次采集时间，刷新互动字段
+        await db.comments.update(existing.id, {
+          ...c,
+          id: existing.id,
+          createdAt: existing.createdAt,
+          updatedAt: nowIso(),
+        });
+        updated++;
+      } else {
+        unchanged++;
       }
     }
     if (toAdd.length) await db.comments.bulkAdd(toAdd);
     return {
       added: toAdd.length,
-      updated: 0,
+      updated,
       unchanged,
-      ids: toAdd.map((c) => c.id),
+      ids: [...toAdd.map((c) => c.id), ...comments.filter((c) => existMap.has(`${c.videoId}#${c.rpidStr}`)).map((c) => existMap.get(`${c.videoId}#${c.rpidStr}`)!.id)],
     };
   },
   async listByVideo(videoId: string, opts: { sinceCtime?: number; limit?: number } = {}): Promise<Comment[]> {

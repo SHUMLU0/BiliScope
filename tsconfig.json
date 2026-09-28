@@ -41,6 +41,6 @@
       "@services/*": ["src/services/*"]
     }
   },
-  "include": ["src", "tests", "extension", "tests/setup.ts"],
+  "include": ["src", "tests", "extension", "scripts", "tests/setup.ts"],
   "exclude": ["node_modules", "dist", ".crxjs", ".chrome"]
 }

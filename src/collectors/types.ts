@@ -15,9 +15,17 @@ export interface CollectorStats {
   pages?: number;
   /** B 站声明的预计总评论数（可能不可靠 / 被风控截断） */
   expectedTotal?: number;
+  /** V0.2.1：原始抓取条数（含重复页/重复 rpid），与 `unique` 分开统计 */
+  fetched?: number;
+  /** V0.2.1：跨页去重后的唯一条数（真正入库依据） */
+  unique?: number;
 }
 
-/** 真实环境诊断（V0.2 · P1 诊断）：让用户知道为什么拿 / 没拿到数据 */
+/**
+ * 真实环境诊断（V0.2 · P1 诊断）：让用户知道为什么拿 / 没拿到数据。
+ * V0.2.1 新增 paginationStalled / duplicatePageDetected / paginationAdvanced / partial，
+ * 使 UI 能明确区分「真的只有这么多」与「分页卡住 / 被风控截断」。
+ */
 export interface CollectorDiagnostics {
   httpStatus?: number;
   biliCode?: number;
@@ -28,6 +36,14 @@ export interface CollectorDiagnostics {
   stored?: number;
   /** 因风控 / 未登录等环境限制导致数据不完整 */
   environmentLimited?: boolean;
+  /** V0.2.1：cursor/页码未前进，分页被服务端"顶住"，已主动终止 */
+  paginationStalled?: boolean;
+  /** V0.2.1：连续两页 rpid 完全重复（服务器返回重复页） */
+  duplicatePageDetected?: boolean;
+  /** V0.2.1：分页确实推进过（至少拿到 2 页不同数据） */
+  paginationAdvanced?: boolean;
+  /** V0.2.1：因 maxPages 等安全上限提前结束，数据不完整 */
+  partial?: boolean;
 }
 
 export interface CollectorOk<T> {

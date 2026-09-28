@@ -24,6 +24,49 @@
 - GitHub 仓库推送因当前环境无 `gh` CLI / 无 git credential，未自动执行。
 - Gemini Adapter 实现但 V0.1 不测试（环境无 Key）。
 
+## [V0.2.1] - 2026-09-28
+
+**「评论采集真实性修复」**：V0.2.0 的评论链路存在 P0 级数据链路问题——真实 Chrome 打开 `BV17u411E7UK` 只能拿到极少量评论，且一级/二级分页协议用错。本次修复对齐真实协议、补齐翻页不变量与跨页去重，并以真实接口验证。
+
+### 根因
+
+1. **一级分页参数错误**：V0.2.0 把上一页 `next_offset` 直接当成 URL 参数 `pagination_reply` 发送。真实协议中该参数**不存在**，正确参数是 **`pagination_str`**，其值是把上一页 `cursor.pagination_reply.next_offset`（一个 JSON 字符串）**原样**包进 `{"offset":"<next_offset>"}`。参数名错 → 服务端只返回第一页，表现为「只能拿到极少量评论」。
+2. **二级分页错用一级游标逻辑**：`/x/v2/reply/reply` 被当作游标分页，实际是 **`pn=1,2,3...` + `ps`（≤20）页码分页**，且不返回 `pagination_reply`。
+3. **无翻页不变量**：`next_offset` 重复返回时不会停止，会反复烧请求甚至用重复数据填满档位。
+4. **无跨页去重**：`normalizeCommentPage()` 只做页内去重，跨页重复靠服务器"自觉"，`fetched` 与 `unique` 未分离。
+
+### P0 — 协议与真实性（核心修复）
+
+- **P0-1 一级分页协议**：新增 `buildCommentMainQuery({aid, mode, paginationOffset})`，统一产出 `oid / type=1 / mode / pagination_str / plat=1 / seek_rpid='' / web_location=1315875`。**删除**错误的 `pagination_reply` URL 参数。新增纯函数 `firstPagePaginationStr()` / `nextPagePaginationStr(nextOffset)`（`{"offset":""}` / `{"offset":"<next_offset>"}`）。**协议来源**：bilibili-API-collect `docs/comment/list.md` + 真实浏览器 Network dump，非猜测。
+- **P0-2 一级测试重写**：删除所有读取 `searchParams.get('pagination_reply')` 的错误假设，改为真正验证「第 1 页 `next_offset=A` → 第 2 次请求 URL 带 `pagination_str` 且含 A → 第 2 页返回不同 rpid → 最终唯一数正确」。
+- **P0-3 分页前进不变量**：维护 `previousOffset`/`currentOffset`/`seenRpidStr`，命中即停——① `nextOffset===previousOffset` → 停 + `paginationStalled` + 环境受限；② 本页唯一新增 === 0 → 停；③ 连续两页 rpid 集合完全相同 → 停 + `duplicatePageDetected`；④ `is_end=true` → 正常结束；⑤ tierLimit → 正常结束；⑥ maxPages → `partial`（绝不谎称完整）。
+- **P0-4 跨页去重**：Collector 维护进程级 `seenRpidStr:Set<string>`，入库前跳过已见的 `rpidStr`；`fetched`（原始）与 `unique`（去重）分离统计。
+- **P0-5 二级分页修复**：`collectSubReplies` 改为 `pn` 递增 + `ps=20`，**不再读 `pagination_reply.next_offset`**，末页判据为 `replies.length < ps`；同样走 `seenRpidStr` 去重。
+- **P0-6 真实 fixture**：新增 `tests/fixtures/real/comment-main-page1.json` / `comment-main-page2.json` / `comment-reply-page1.json` / `comment-reply-page2.json`，覆盖 `rpid/rpid_str/mid/mid_str/parent/root/dialog/rcount/like/ctime/member/content/cursor/pagination_reply.next_offset`，并跑通 `response → normalizer → collector → repository → Dexie` 全链路。
+- **P0-7 真实 Chrome E2E（真实验证）**：先 `/x/web-interface/view?bvid=BV17u411E7UK` 取真实 aid，再 `standard=200 / depth=top / sort=time` 采集。**实测结果：`REAL_API_PASS`**——`HTTP=200 · code=0 · pages=10 · 声明总数=11695 · fetched=200 · unique=200 · paginationAdvanced=true · environmentLimited=false`（耗时 1.77s，未触发风控）。修复前只能取到个位数评论。
+
+### P1 — 一致性与语义
+
+- **P1-8 ID 字符串规范键**：保留 `rpid`/`mid` 兼容字段，Repository 去重 / 索引 / 关系键优先使用 `rpidStr`/`midStr`/`rootRpidStr`/`parentRpidStr`/`dialogStr`；Dexie **v3 schema** 新增上述索引（v1/v2 保留）。杜绝 JS Number 精度导致的误合并。
+- **P1-9 互动字段更新语义**：静态字段不变 → `unchanged`；互动字段（`like`/`replyCount`/`location`/`vipStatus`）变化 → `updated`，且保留原 `id` / `createdAt`。
+- **P1-10 未知不伪装成 0**：`num()` 区分「真实 0」/「缺失 → null」/「失败 → unknown」；UI 对 `null` 显示 `—`。
+
+### Engineering
+
+- 测试：**224 passed / 1 skipped（27 files）**，其中评论链路 36 passed。含第 11 条关键回归（第 1 页仅 3 条但第 2 页有数据时**不得停在 3**）。
+- 修复测试基建缺陷：`globalThis.fetch` 直接赋值不被 `vi.restoreAllMocks()` 还原，导致 E2E 被 mock 污染（"幽灵失败"）；现显式保存/还原真实 `fetch`。
+- `tsconfig.json` 纳入 `scripts/`，修复 `probe-real-api.ts` 的 `wts` 类型错误；ESLint 全绿。
+- 版本号统一：package.json / manifest.json / CHANGELOG / DEPLOYMENT / FINAL_AUDIT / PROGRESS 全部对齐 **V0.2.1**。
+
+### 验收口径（工程门禁 ≠ 真实链路）
+
+`typecheck / test / lint / build / scan-secrets / verify-acceptance` 全绿仅为**工程门禁 PASS**，与真实评论链路是否打通无关。真实链路结果单独记录：**`REAL_API_PASS`**（本次）/ `REAL_API_ENV_LIMIT` / `REAL_API_FAIL` / `CHROME_E2E_PASS`，**绝不合并两种口径**。
+
+### Known limitations
+
+- 无登录态：极深分页与楼中楼在风控环境下可能被限制，此时标注 `environmentLimited` / `partial`，**不伪造成功**。
+- 真实端到端需低风控网络环境，CI 中默认跳过（`RUN_REAL_E2E=1` 手动触发）。
+
 ## [V0.2.0] - 2026-09-28
 
 大版本升级：从「能采集」走向「能研究」。核心是把评论、视频、账号三条数据链路做深，并补上任务系统、灵感闭环与研究结论的「事实 / 推断分离」。

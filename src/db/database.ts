@@ -14,6 +14,8 @@
  *  - v2：评论模型升级（P0-C）。移除无效索引 memberId（模型已无此字段），
  *        新增 rpidStr / rootRpid / replyLevel 等查询索引，便于按「根评论展开二级回复」
  *        与「按层级筛选一级评论」查询。
+ *  - v3：评论 canonical key 字符串化（V0.2.1 · P1-8）。新增 rootRpidStr / parentRpidStr 索引，
+ *        关系引用改用字符串，避免大 rpid 超出 Number 安全范围时精度丢失。
  */
 
 import Dexie, { type Table } from 'dexie';
@@ -66,6 +68,11 @@ export class BiliScopeDB extends Dexie {
     this.version(2).stores({
       comments:
         'id, videoId, rpidStr, rootRpid, replyLevel, ctime, [videoId+ctime], [videoId+replyLevel]',
+    });
+    // V0.2.1 · P1-8：评论关系键字符串化，新增 rootRpidStr / parentRpidStr 索引。
+    this.version(3).stores({
+      comments:
+        'id, videoId, rpidStr, rootRpidStr, parentRpidStr, replyLevel, ctime, [videoId+ctime], [videoId+replyLevel], [videoId+rootRpidStr]',
     });
   }
 }

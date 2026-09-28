@@ -1,0 +1,76 @@
+{
+  "_source": "GET /x/v2/reply/wbi/main (query: oid, type=1, mode, pagination_str=<page1 next_offset as offset>, plat=1, seek_rpid=, web_location=1315875)",
+  "_note": "第 2 页真实响应结构。判据：请求必须带 pagination_str 且其 offset 等于第 1 页的 next_offset；返回 rpid 不重复、cursor 前进、is_end=true。",
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "cursor": {
+      "is_begin": false,
+      "is_end": true,
+      "prev": 1,
+      "next": 2,
+      "name": "按时间",
+      "session_id": "",
+      "all_count": 137,
+      "pagination_reply": {
+        "next_offset": null,
+        "prev_offset": "{\"type\":3,\"direction\":2,\"data\":{\"cursor\":20}}"
+      }
+    },
+    "replies": [
+      {
+        "rpid": 1500000004,
+        "rpid_str": "15000000004",
+        "oid": 1,
+        "type": 1,
+        "mid": 900000004,
+        "mid_str": "90000000004",
+        "root": 0,
+        "parent": 0,
+        "dialog": 1500000004,
+        "count": 0,
+        "rcount": 0,
+        "like": 12,
+        "ctime": 1735000500,
+        "member": {
+          "mid": "90000000004",
+          "uname": "观众丁",
+          "sex": "保密",
+          "level_info": { "current_level": 2 },
+          "vip": { "vipStatus": 0 }
+        },
+        "content": { "message": "第二页的评论，用于验证翻页确实前进", "members": [] },
+        "reply_control": { "location": "IP属地：广东", "is_up_top": false }
+      },
+      {
+        "rpid": 1500000005,
+        "rpid_str": "15000000005",
+        "oid": 1,
+        "type": 1,
+        "mid": 900000005,
+        "mid_str": "90000000005",
+        "root": 0,
+        "parent": 0,
+        "dialog": 1500000005,
+        "count": 0,
+        "rcount": 0,
+        "like": 5,
+        "ctime": 1735000600,
+        "member": {
+          "mid": "90000000005",
+          "uname": "观众戊",
+          "sex": "男",
+          "level_info": { "current_level": 6 },
+          "vip": { "vipStatus": 0 }
+        },
+        "content": { "message": "已经三连，期待更新", "members": [] },
+        "reply_control": { "location": "IP属地：浙江", "is_up_top": false }
+      }
+    ],
+    "hots": [],
+    "upper": { "top": null },
+    "config": { "showadmin": 1, "showentry": 1, "read_only": false },
+    "control": { "input_disable": false }
+  }
+}

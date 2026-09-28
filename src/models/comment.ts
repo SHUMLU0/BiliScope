@@ -18,17 +18,22 @@ export const commentSchema = z.object({
   id: nonEmpty,
   videoId: nonEmpty,
 
-  // —— 标识（字符串优先，保证精度）——
+  // —— 标识（字符串优先，保证精度；V0.2.1 起为 canonical key）——
   rpid: z.number().int().nonnegative(),
   rpidStr: z.string().min(1),
   mid: z.number().int().nonnegative(),
   midStr: z.string().min(1),
 
-  // —— 层级关系 ——
+  // —— 层级关系（数字兼容字段）——
   rootRpid: z.number().int().nonnegative().default(0),
   parentRpid: z.number().int().nonnegative().default(0),
   dialog: z.number().int().nonnegative().default(0),
   replyLevel: z.number().int().min(1).max(3).default(1),
+
+  // —— 层级关系（V0.2.1 · P1-8 字符串 canonical key，避免大整数精度丢失）——
+  rootRpidStr: z.string().default(''),
+  parentRpidStr: z.string().default(''),
+  dialogStr: z.string().default(''),
 
   // —— 内容 / 互动 ——
   like: z.number().int().nonnegative().default(0),
@@ -38,7 +43,7 @@ export const commentSchema = z.object({
   content: z.string().max(8000),
   level: z.number().int().min(0).max(7).default(0),
 
-  // —— 可选画像（接口稳定提供时才有）——
+  // —— 可选画像（接口稳定提供时才有；缺失 = undefined，UI 显示 –）——
   sex: z.string().max(8).optional(),
   vipStatus: z.number().int().optional(),
   location: z.string().max(64).optional(),

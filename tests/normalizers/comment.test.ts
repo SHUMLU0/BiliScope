@@ -86,18 +86,52 @@ describe('normalizeCommentPage (V0.2 cursor)', () => {
     expect(r.comments[0]!.replyLevel).toBe(1);
   });
 
-  it('normalizeSubReplies sets replyLevel=2 and rootRpid', () => {
+  it('normalizeSubReplies sets replyLevel=2 / rootRpid / 字符串关系键，total=本页原始条数', () => {
     const raw = {
       code: 0,
       data: {
-        cursor: { all_count: 0, is_end: true, pagination_reply: { next_offset: null } },
+        page: { num: 1, size: 20, count: 1 },
         replies: [rawReply(5, { parent: 99, dialog: 99 })],
       },
     };
-    const r = normalizeSubReplies({ videoId: 'v', rootRpid: 99, raw });
+    const r = normalizeSubReplies({ videoId: 'v', rootRpid: 99, rootRpidStr: '99', raw });
     expect(r.comments).toHaveLength(1);
     expect(r.comments[0]!.replyLevel).toBe(2);
     expect(r.comments[0]!.rootRpid).toBe(99);
     expect(r.comments[0]!.parentRpid).toBe(99);
+    // V0.2.1（P1-8）：字符串关系键
+    expect(r.comments[0]!.rootRpidStr).toBe('99');
+    expect(r.comments[0]!.parentRpidStr).toBe('99');
+    // V0.2.1（P0-5）：total 是「本页原始条数」，供 Collector 用 `< ps` 判定是否到底
+    expect(r.total).toBe(1);
+    // 二级不再依赖 cursor：nextOffset 恒为 null
+    expect(r.nextOffset).toBeNull();
+  });
+
+  it('V0.2.1: 二级回复不读 cursor —— 即使响应带 next_offset 也不据此判 hasMore', () => {
+    const raw = {
+      code: 0,
+      data: {
+        cursor: { all_count: 0, is_end: false, pagination_reply: { next_offset: 'should-be-ignored' } },
+        replies: [rawReply(5, { parent: 99, dialog: 99 })],
+      },
+    };
+    const r = normalizeSubReplies({ videoId: 'v', rootRpid: 99, raw });
+    expect(r.ok).toBe(true);
+    expect(r.nextOffset).toBeNull();
+    expect(r.total).toBe(1);
+  });
+
+  it('P1-10: 缺失画像字段 → undefined（不是 0 / "未知"）；location 从 reply_control 提取', () => {
+    const withCtrl = rawReply(1, { member: { uname: 'u', level_info: { current_level: 2 }, vip: {} }, reply_control: { location: 'IP属地：北京' } });
+    const bare = rawReply(2, { member: { uname: 'u2', level_info: { current_level: 1 }, vip: {} } });
+    const r = normalizeCommentPage({
+      videoId: 'v',
+      raw: mainRaw({ replies: [withCtrl, bare], all_count: 2, is_end: true, next_offset: null }),
+    });
+    expect(r.comments[0]!.location).toBe('北京');
+    expect(r.comments[1]!.location).toBeUndefined();
+    expect(r.comments[1]!.sex).toBeUndefined();
+    expect(r.comments[1]!.vipStatus).toBeUndefined();
   });
 });

@@ -47,7 +47,7 @@ function sign(mixin: string, params: Record<string, string | number>): string {
   for (const [k, v] of Object.entries(params)) {
     filtered[k] = String(v).replace(/[!'()*]/g, '');
   }
-  filtered.wts = Math.floor(Date.now() / 1000);
+  filtered.wts = String(Math.floor(Date.now() / 1000));
   const query = Object.keys(filtered)
     .sort()
     .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(filtered[k])}`)

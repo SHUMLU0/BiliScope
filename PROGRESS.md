@@ -5,6 +5,41 @@
 
 ---
 
+## V0.2.1 评论采集真实性修复（`pagination_str` 协议 + 翻页不变量 + 跨页去重）
+
+> 触发：真实 Chrome 打开 `BV17u411E7UK` 只能取到极少量评论。根因：一级分页参数写成了**不存在**的 `pagination_reply`，正确参数是 **`pagination_str`**。
+
+| 编号 | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **P0-1** | 一级分页协议 | ✅ | `buildCommentMainQuery` 统一构造 `oid/type=1/mode/pagination_str/plat=1/seek_rpid/web_location`；**删除** `pagination_reply`；`firstPagePaginationStr()` / `nextPagePaginationStr()` |
+| **P0-2** | 一级测试重写 | ✅ | 删除读 `pagination_reply` 的错误假设；验证「第 1 页 next_offset=A → 第 2 请求带 pagination_str 含 A → 第 2 页不同 rpid → 唯一数正确」 |
+| **P0-3** | 翻页前进不变量 | ✅ | offset 重复 → 停 + `paginationStalled`；本页唯一新增 0 → 停；连续两页 rpid 集合相同 → 停 + `duplicatePageDetected`；`is_end`/tierLimit → 正常结束；maxPages → `partial` |
+| **P0-4** | 跨页去重 | ✅ | Collector 进程级 `seenRpidStr`；`fetched`（原始）与 `unique`（去重）分离 |
+| **P0-5** | 二级回复分页 | ✅ | `/x/v2/reply/reply` 改 `pn` + `ps=20`，**不读** `next_offset`，末页判据 `replies.length < ps` |
+| **P0-6** | 真实 fixture | ✅ | 新增 `tests/fixtures/real/comment-{main,reply}-page{1,2}.json`；全链路 `response → normalizer → collector → repository → Dexie` |
+| **P0-7** | 真实 Chrome E2E | ✅ | **`REAL_API_PASS`**：`BV17u411E7UK` HTTP=200/code=0/pages=10/fetched=200/unique=200/paginationAdvanced=true/1.77s |
+| **P1-8** | ID 字符串规范键 | ✅ | Repository 去重/索引/关系键优先 `rpidStr`/`midStr`/`rootRpidStr`/`parentRpidStr`/`dialogStr`；Dexie **v3 schema** |
+| **P1-9** | 互动字段更新语义 | ✅ | 静态同 → `unchanged`；`like/replyCount/location/vipStatus` 变 → `updated` 且保留 `id`/`createdAt` |
+| **P1-10** | 未知不伪装成 0 | ✅ | `num()` 区分真实 0 / 缺失 `null` / 失败 unknown；UI `null` → `—` |
+
+### 门禁（V0.2.1）
+
+| 命令 | 结果 | 证据 |
+|---|---|---|
+| `tsc --noEmit` | ✅ EXIT=0 | — |
+| `eslint` | ✅ EXIT=0 | 0 error / 0 warning |
+| `vitest run` | ✅ **224 passed / 1 skipped（27 files）** | 评论链路 36 passed；1 个 `RUN_REAL_E2E` 门控真实用例 |
+| `vite build` | ✅ OK | 110 modules · 4.09s |
+| `scan-secrets` | ✅ 0 leaks | — |
+| `verify-acceptance` | ✅ TEST 001-009 PASSED | 010/011 延后至 commit/push 后 |
+| `RUN_REAL_E2E=1` | ✅ **`REAL_API_PASS`** | `pages=10 fetched=200 unique=200 paginationAdvanced=true` |
+| `git status` → commit → push → CI | ⬜ 本轮最后执行 | **单个分组提交**（非逐模块） |
+
+> **门禁顺序固定**：typecheck → test → lint → build → secret-scan → acceptance → git status → commit → push → CI。
+> **结论分级**（最终报告不合并）：OFFLINE PASS / INTEGRATION PASS / REAL API PASS / REAL API ENVIRONMENT LIMITED / CHROME E2E PASS。
+
+---
+
 ## V0.2.0 大版本升级（评论深度 / 研究能力 / 任务系统 / 灵感闭环）
 
 > 目标：从「能采集」走向「能研究」。批处理 + 并行任务组（A–G）+ 分阶段统一验收；

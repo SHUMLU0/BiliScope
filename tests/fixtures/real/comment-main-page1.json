@@ -1,0 +1,105 @@
+{
+  "_source": "GET /x/v2/reply/wbi/main (query: oid, type=1, mode, pagination_str, plat=1, seek_rpid=, web_location=1315875)",
+  "_note": "真实响应结构（字段名与嵌套严格按 B 站响应；内容与 ID 为脱敏占位）。分页关键：data.cursor.pagination_reply.next_offset 是 JSON 字符串，须原样作为下一页 pagination_str 的 offset。rpid 为 Number 兼容字段，rpid_str 才是规范键。",
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "cursor": {
+      "is_begin": true,
+      "is_end": false,
+      "prev": 0,
+      "next": 1,
+      "name": "按时间",
+      "session_id": "",
+      "all_count": 137,
+      "pagination_reply": {
+        "next_offset": "{\"type\":3,\"direction\":1,\"data\":{\"cursor\":20}}",
+        "prev_offset": ""
+      }
+    },
+    "replies": [
+      {
+        "rpid": 1500000001,
+        "rpid_str": "15000000001",
+        "oid": 1,
+        "type": 1,
+        "mid": 900000001,
+        "mid_str": "90000000001",
+        "root": 0,
+        "parent": 0,
+        "dialog": 1500000001,
+        "count": 4,
+        "rcount": 4,
+        "like": 328,
+        "ctime": 1735000000,
+        "member": {
+          "mid": "90000000001",
+          "uname": "观众甲",
+          "sex": "保密",
+          "sign": "",
+          "level_info": { "current_level": 5 },
+          "vip": { "vipStatus": 0 },
+          "location": "IP属地：北京"
+        },
+        "content": { "message": "这个部分的讲解很清楚，希望能出续集", "members": [] },
+        "reply_control": { "location": "IP属地：北京", "is_up_top": false }
+      },
+      {
+        "rpid": 1500000002,
+        "rpid_str": "15000000002",
+        "oid": 1,
+        "type": 1,
+        "mid": 900000002,
+        "mid_str": "90000000002",
+        "root": 0,
+        "parent": 0,
+        "dialog": 1500000002,
+        "count": 1,
+        "rcount": 1,
+        "like": 96,
+        "ctime": 1735000120,
+        "member": {
+          "mid": "90000000002",
+          "uname": "观众乙",
+          "sex": "女",
+          "sign": "",
+          "level_info": { "current_level": 4 },
+          "vip": { "vipStatus": 1 },
+          "location": "IP属地：上海"
+        },
+        "content": { "message": "弹幕里说的问题这里确实没讲透", "members": [] },
+        "reply_control": { "location": "IP属地：上海", "is_up_top": false }
+      },
+      {
+        "rpid": 1500000003,
+        "rpid_str": "15000000003",
+        "oid": 1,
+        "type": 1,
+        "mid": 900000003,
+        "mid_str": "90000000003",
+        "root": 0,
+        "parent": 0,
+        "dialog": 1500000003,
+        "count": 0,
+        "rcount": 0,
+        "like": 0,
+        "ctime": 1735000300,
+        "member": {
+          "mid": "90000000003",
+          "uname": "观众丙",
+          "sex": "男",
+          "sign": "",
+          "level_info": { "current_level": 3 },
+          "vip": { "vipStatus": 0 }
+        },
+        "content": { "message": "第一次看这个系列，先码住", "members": [] },
+        "reply_control": { "is_up_top": false }
+      }
+    ],
+    "hots": [],
+    "upper": { "top": null },
+    "config": { "showadmin": 1, "showentry": 1, "read_only": false },
+    "control": { "input_disable": false }
+  }
+}
