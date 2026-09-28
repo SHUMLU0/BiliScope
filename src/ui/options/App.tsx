@@ -121,6 +121,19 @@ export function OptionsApp() {
             该 Provider 支持 Structured Outputs（`response_format: json_schema`）— 不确定请留空，将降级为 JSON mode
           </span>
         </label>
+        {/* V3.0.1 · P0-4：请求超时（默认 60s）。超时会明确报 REQUEST_TIMEOUT，而非笼统的 REQUEST_FAILED */}
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="muted">请求超时 timeoutMs（默认 60 秒）</span>
+          <select
+            value={String(cfg.timeoutMs ?? 60_000)}
+            onChange={(e) => updateCfg({ timeoutMs: Number(e.target.value) })}
+          >
+            <option value="30000">30 秒</option>
+            <option value="60000">60 秒（默认）</option>
+            <option value="90000">90 秒</option>
+            <option value="120000">120 秒</option>
+          </select>
+        </label>
         <div className="row">
           <button onClick={handleSave} disabled={saving}>
             {saving ? '保存中…' : '保存'}

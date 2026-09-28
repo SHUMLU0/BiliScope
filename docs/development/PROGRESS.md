@@ -1,7 +1,30 @@
-# BiliScope V3.0 进度表
+# BiliScope V3.0.1 进度表
 
 > 唯一进度表（Single Source of Truth）。
 > 状态：✅ 完成 / 🔄 进行中 / ⏸ 阻塞 / ⬜ 未开始
+
+---
+
+## V3.0.1 「稳定性 / 性能 / UI / 文档维护版」
+
+> 定位：**维护版**。不新增研究方向，不重写采集层，不更换数据层。
+> 目标：修复 V3.0.0 已暴露的真实缺陷，并把 GitHub 文档整理到与源码一致。
+
+| 编号 | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **P0-1** | AI 样本输入失控 | ✅ | `buildCommentAnalyzePrompt()` 曾自行 `slice(0, 200)` 绕过 prepare 层 `sampleLimit=120`；现 prompt 只接收 `prep.sample`，**禁止 prompt 层再 slice**；新增 sample 策略（高赞/最新/多样性）；UI 显示 `统计基数 · AI 样本`；`AI-PERF-001/002` |
+| **P0-2** | `CommentAnalysis` 结构化结果持久化 | ✅ | 新增 `analysisResult`（Zod 校验过的结构化业务结果）作为 UI 唯一来源；`rawResponse` 明确为 Provider 原始响应（仅审计）；`refresh()` 不再覆盖正确 report；V3.0.0 旧记录显示「旧版本记录…请重新分析」；`AI-STORE-001..004` |
+| **P0-3** | AI UI 前置 | ✅ | 顺序：标题 → BV/采集/AI 分析/AI 历史 → AI 状态/报告 → 统计事实 → Top → 本地评论；**以最终 dist 构建产物验收**（`UI-ORDER-001`） |
+| **P0-4** | timeout 与失败分类 | ✅ | 默认超时 30s → **60s**；设置页可选 30/60/90/120s；`AbortError → REQUEST_TIMEOUT`；细分 `REQUEST_HTTP_ERROR / REQUEST_NETWORK_ERROR / REQUEST_RATE_LIMITED / REQUEST_CONTEXT_TOO_LARGE / REQUEST_PROVIDER_ERROR`；技术细节禁止为空；`AI-TIMEOUT-001` / `AI-ERROR-001/002` |
+| **P1-5** | AI 输入预算可视化 | ✅ | `budget`（样本条数 / 样本字符 / facts 字符 / 总字符 / overBudget）；UI 显示 `AI 输入：120 条样本 · 约 XXk 字符` |
+| **P1-6** | AI 失败不覆盖历史成功 | ✅ | 失败不清空 `report`、不删库；UI 显示「本次分析失败」+「最近一次成功分析：<时间>」 |
+| **§7** | AI 阶段状态提示 | ✅ | 真实阶段（准备数据 / 构造上下文 / 请求模型 / 校验结果 / 保存分析）+ 真实耗时秒数；>10s / >30s 提示；**无假进度百分比** |
+| **§8** | README 全面重写 | ✅ | 不再是 V0.1/V0.2/V0.3 旧文案；含「当前版本 / 核心能力 / 评论研究 / AI 分析 / 安装 / AI 配置 / 数据与隐私 / 已知限制 / V3.0→V3.0.1 / Project Structure / 文档 / License」 |
+| **§9** | 修复死链接 | ✅ | 全仓库 markdown 本地链接校验：**0 死链接**（`DOC-002`） |
+| **§10** | GitHub 文档整理 | ✅ | 根目录保留 README/CHANGELOG/ARCHITECTURE/DEPLOYMENT/DATA_POLICY/LICENSE/NOTICE；开发过程文档 → `docs/development/`；规格 → `docs/SPEC.md`；引用全部更新 |
+| **§11** | 仓库首页元数据 | ⏳ | 视 GitHub 可用性更新 description / topics / tag `v3.0.1` / Release Notes |
+| **§12** | CHANGELOG | ✅ | 新增 `[V3.0.1] - 2026-09-28`（Fixed 6 条 + Improved 6 条 + Tests） |
+| **§15** | 版本发布 | ✅ | `3.0.0 → 3.0.1`（package.json / manifest.json / CHANGELOG / DEPLOYMENT / FINAL_AUDIT / PROGRESS 六处对齐） |
 
 ---
 

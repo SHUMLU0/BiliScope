@@ -1,90 +1,179 @@
 # BiliScope
 
-> Bilibili 创作者研究 + 内容生态分析 + 个人内容实验工具。
+> Bilibili 创作者研究、评论研究、内容生态分析与 AI 辅助研究工具。
 
-V0.1 = **公开数据可靠采集 + 本地结构化保存 + 基础查询/分析**，为后续 AI 与内容实验闭环打地基。
-
----
-
-## 项目边界（V0.1 不做什么）
-
-- ❌ 自动剪辑 / 自动出片 / 视频自动发布
-- ❌ 跨平台统一发布
-- ❌ AI 自动写完整脚本 / 做封面
-- ❌ "爆款概率百分比"等伪精确预测
-- ❌ 用户系统 / 云数据库 / 付费
-- ❌ 破解登录 / 绕过验证码 / 盗取 Cookie
-
-V0.1 只做：**采集 → 存储 → 查询 → 分析 → 提示**，AI 输出强制分 `facts / explanations / uncertainty` 三段。
+**BiliScope** 是一个 Chrome 扩展（Manifest V3）。它在**本地**保存 B 站公开数据，提供创作者研究、评论研究、内容生态分析与 **可验证的 AI 辅助分析**。
 
 ---
 
-## 主要功能
+## 当前版本
 
-| Page | 名称 | 核心能力 |
-|---|---|---|
-| 1 | 账号研究 | UP 主概览、视频列表、历史趋势、客观自动标记 |
-| 2 | 全站雷达 | 50w+ UP 主搜索/筛选/排序（阶段化增量） |
-| 3 | 评论研究 | 主题/高频词/支持/反对/需求/情绪（强制 anti-词云幻觉）+ **AI 分析报告（9 分区）** |
-| 4 | 我的数据 | 手动输入 UID，查看自有视频 + 多时间点 snapshot |
-| 5 | 热点雷达 | 公开热门 / 排行 / 搜索趋势（不含规避监管建议） |
-| 6 | 灵感 & 选题 | 一句话保存、状态机：`idea → researching → ready → producing → published → verified / discarded` |
-| 7 | **AI 历史** | 每次 AI 请求的审计记录：Provider·模型 / 状态 / finishReason / 解析结果 / tokens / 耗时，可展开原始 prompt 与响应 |
+**v3.0.1**
 
-AI 配套：账号分析 / 评论分析 / 视频研究 三类（OpenAI-compatible / DeepSeek / Gemini / Custom）。
+`V3.0.1 = V3.0 可验证 AI 分析系统的稳定性 / 性能 / UI / 文档维护版`。
+
+它不新增研究方向，只修复 V3.0.0 已暴露的真实缺陷：AI 输入样本失控、产品结果持久化错位、请求失败无法诊断、AI 报告位置不合理，并把 GitHub 文档整理到与源码一致。
 
 ---
 
-## V3.0「可验证 AI 分析系统」
+## 核心能力
 
-> **AI 输出必须是可验证的数据，不是一段字符串。**
-
-- **统一领域契约**：`src/ai/schemas.ts` 一处定义，prompt 文本 / JSON Schema / Zod 校验三者同源；全部 Provider 共用。
-- **分层失败**：区分 `REQUEST_FAILED / OUTPUT_EMPTY / OUTPUT_TRUNCATED / OUTPUT_INVALID_JSON / OUTPUT_SCHEMA_INVALID / OUTPUT_REFUSAL / NO_PROVIDER`，UI 显示**真实原因**，不再一律「AI 失败」。
-- **最多 2 次请求**：第 2 次仅对「无效 JSON / schema 不符」做一次修复（只改结构，不重新分析）；截断**不修复**，如实告知输出上限不足。
-- **引用可验证**：`support` / `opposition` 每条论断必须带真实 `rpid`，点击可定位到本地评论；无引用论断显式标注 `[无引用]`。
-- **失败零落库**：只有 `SUCCESS` 才写 `CommentAnalysis`（产品结果）；`AIAnalysis` 只作审计。
-- **反「幽灵成功」**：无关 JSON（如 `{"ok":1}`）不会被补全成「全空成功分析」，一律判 `OUTPUT_SCHEMA_INVALID`。
+| 能力 | 说明 |
+|---|---|
+| **账号研究** | UP 主概览、投稿列表、历史趋势快照、客观自动标记 |
+| **全站雷达** | UP 主搜索 / 筛选 / 排序（阶段化增量采集） |
+| **评论研究** | 直接输入 BV 采集评论，主题 / 高频词 / 支持 / 反对 / 需求 / 情绪的客观统计 + AI 分析报告 |
+| **AI 评论分析** | 结构化输出 + Zod 校验 + rpid 引用，报告 9 个分区 |
+| **AI 历史审计** | 每次 AI 请求的完整审计记录：Provider / 模型 / finishReason / tokens / 原始 prompt 与响应 |
+| **视频数据与快照** | 视频指标随时间的快照（稳定属性归实体，动态指标归快照） |
+| **热点 → 灵感 → 实验** | 热点采集 → 一句话灵感 → 状态机式内容实验闭环 |
+| **本地数据管理** | 全部数据存于浏览器 IndexedDB，可导出 / 导入 / 一键清空 |
+| **任务与诊断** | 采集任务的进度、失败原因与业务码诊断 |
 
 ---
 
-## 安装（开发模式）
+## 评论研究
+
+- **直接输入 BV 即可采集评论**：不需要先手动添加 UP 主或视频。
+- 本地已有该 `Video` → **不重复请求** `/x/web-interface/view`；本地没有 → 自动 bootstrap（`/view` → 建最小 Creator → 保存 Video）。
+- 支持分页采集，遵守「翻页必须前进」的不变量，并对跨页重复做去重。
+- 支持一级评论与楼中楼（二级回复）展开，深度可配置。
+- **统计事实与 AI 推断严格分离**：统计是客观计算，AI 只做解释。
+
+---
+
+## AI 分析
+
+核心原则：**AI 输出必须是可验证的数据，不是一段字符串。**
+
+- **采集 N 条评论 ≠ AI 必须分析 N 条评论**。
+  - 统计基于**全部已采集数据**（采集 200 条 → 统计基数就是 200）。
+  - AI 只接收**受控的代表性样本**（默认上限 120 条），由采样策略决定（高赞 / 最新 / 多样性）。
+  - UI 会明确显示：`统计基数：200 · AI 分析样本：120`。
+- **Structured Output 优先**：能力允许时下发 `json_schema`，否则降级 `json_object`，再降级 prompt 约束 —— 且始终用 Zod 做本地校验。
+- **统一领域契约**：`src/ai/schemas.ts` 一处定义，prompt 文本 / JSON Schema / Zod 校验三者同源。
+- **引用必须可验证**：`support` / `opposition` 每条论断必须带真实 `rpid`，点击可定位到本地评论；无引用的论断会被显式标注。
+- **分层失败诊断**：区分超时 / HTTP 错误 / 网络错误 / 限流 / 输入过大 / Provider 错误 / 空输出 / 截断 / 非法 JSON / schema 不符 / 拒答 / 未配置 Provider，UI 显示真实原因。
+- **`AIAnalysis` 是审计记录**（完整 prompt / 原始响应 / token / finishReason），**`CommentAnalysis` 是产品结果**。二者语义分离，UI 只消费产品结果里的结构化业务结果。
+- **失败零落库**：只有 `SUCCESS` 才写 `CommentAnalysis`。
+- **失败不覆盖历史成功**：再次分析失败时保留最近一次成功结果，并如实说明本次失败原因。
+- 支持查看 AI 历史（审计记录）。
+
+---
+
+## 安装
 
 ```bash
 pnpm install
-pnpm run verify         # 类型 + lint + 单测 + build
-pnpm run dev            # 开发模式（Vite watch）
-# 在 chrome://extensions/ 打开"开发者模式" → "加载已解压的扩展程序" → 选 dist/
+pnpm build          # 产出 dist/
+```
+
+然后在 Chrome 中加载：
+
+1. 打开 `chrome://extensions`
+2. 打开右上角「开发者模式」
+3. 点击「加载已解压的扩展程序」
+4. 选择项目下的 `dist/` 目录
+
+开发模式：`pnpm dev`（Vite watch）。质量门禁：`pnpm run verify`（类型 + lint + 单测 + build）。
+
+---
+
+## AI 配置
+
+在扩展的「设置」页配置 Provider：
+
+| Provider | 说明 |
+|---|---|
+| `openai-compatible` | 任意 OpenAI 兼容端点 |
+| `deepseek` | DeepSeek 官方端点 |
+| `gemini` | Google Gemini |
+| `custom` | 自建 / 代理端点 |
+
+- **API Key 仅保存在本地**（浏览器存储），**不提交 Git、不写入日志、不进入审计包**。
+- Provider 的 **endpoint / model 必须互相对应**：程序按 Provider 名读取该 Provider 自己的 `baseUrl / apiKey / model`，不会「请求发到 A 端点却标称是 B」。
+- 可配置 `max_tokens`（输出上限）与 `timeoutMs`（请求超时，默认 60 秒）。
+
+---
+
+## 数据与隐私
+
+- 所有采集数据通过 **IndexedDB 本地存储**，不上传任何服务器。
+- 只采集 **B 站公开数据**（公开 API 与公开网页）。
+- **不主动获取 Cookie / SESSDATA / bili_jct**，不读取登录态。
+- AI 分析会把**用户选择的结构化数据**（统计事实 + 受控评论样本）发送给对应的 AI Provider —— 这是 AI 功能生效的必要条件。
+- AI 请求与响应会留下**本地审计记录**，便于复核。
+- 详见 [`DATA_POLICY.md`](./DATA_POLICY.md)。
+
+---
+
+## 已知限制
+
+本版本**不声称一切功能已在真实环境端到端打通**。以下限制是真实存在的：
+
+- **B 站可能触发风控**：匿名、无 Cookie 的采集在部分接口 / 环境下会返回 `-352` / `-412` / `-509` 等业务码。此时程序会返回 `ok:false` 并标记 `environmentLimited`，**不会**显示「采集完成 0 条」。
+- **深分页与楼中楼可能受环境限制**：极端深度或高频请求下，B 站可能提前结束分页，数据可能不完整。
+- **Real Provider E2E 取决于本地配置**：真实 AI 端到端的通过与否取决于使用者本地是否配置了可用的 API Key。仓库内的自动化测试使用 **mock fetch**，因此**本地离线测试通过 ≠ Real API PASS**。
+- **Chrome 自动 E2E 在当前环境可能受限**：命令行 `--load-extension` 在部分环境不加载未打包扩展，自动化脚本会如实报告 `CHROME_E2E_ENV_LIMITED`（≠ FAIL），需人工在 `chrome://extensions` 加载 `dist/` 复核。
+
+---
+
+## V3.0 → V3.0.1
+
+| 版本 | 定位 |
+|---|---|
+| **V3.0** | **可验证 AI 分析系统**：统一领域契约、Structured Output、Zod 校验、分层失败、引用可验证、失败零落库。 |
+| **V3.0.1** | **AI 输入性能 / 持久化结果 / 超时诊断 / UI 位置 / GitHub 文档整理**。 |
+
+V3.0.1 是一个**维护版**，只修复与打磨，不重写采集层、不更换数据层。
+
+---
+
+## Project Structure
+
+```
+BiliScope/
+├─ extension/            # MV3 manifest 与静态资源
+├─ src/
+│  ├─ ai/                # AI 层：schemas / prompts / orchestrator / adapters / failures
+│  ├─ collectors/        # 采集层：creator / video / comment / search / hot-topic
+│  ├─ normalizers/       # 接口响应 → 领域模型
+│  ├─ repositories/      # Dexie 读写（upsert 按业务字段变化）
+│  ├─ db/                # Dexie schema 与迁移
+│  ├─ models/            # Zod 领域模型（唯一真相）
+│  ├─ services/          # 业务编排（评论准备 / 视频 bootstrap / 任务运行器 等）
+│  ├─ ui/                # popup / options / content script / 各功能页
+│  └─ utils/             # WBI 签名、MD5、HTTP、时间、日志
+├─ scripts/              # 验收脚本、E2E 辅助脚本
+├─ tests/                # Vitest 单元 / 集成测试
+└─ docs/                 # 规格与开发过程文档
 ```
 
 ---
 
-## 数据来源
+## 文档
 
-- B 站公开 API（`api.bilibili.com`）
-- B 站公开网页（被注入 content script 的页面）
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — 系统架构
+- [`CHANGELOG.md`](./CHANGELOG.md) — 版本变更记录
+- [`DEPLOYMENT.md`](./DEPLOYMENT.md) — 构建与发布
+- [`DATA_POLICY.md`](./DATA_POLICY.md) — 数据与隐私政策
+- [`docs/SPEC.md`](./docs/SPEC.md) — 工程规格
+- [`docs/development/PROGRESS.md`](./docs/development/PROGRESS.md) — 开发进度
+- [`docs/development/FINAL_AUDIT.md`](./docs/development/FINAL_AUDIT.md) — 最终审计
+- [`OPEN_SOURCE_AUDIT.md`](./OPEN_SOURCE_AUDIT.md) — 开源审计
+- [`NOTICE`](./NOTICE) — 第三方参考与授权
 
-**不获取任何 Cookie / Token / SESSDATA / bili_jct**。
+---
 
-详见 [`DATA_POLICY.md`](./DATA_POLICY.md)。
+## 注意事项
+
+- 数据来源（B 站接口）可能变化，届时采集层需要更新。
+- 任何 AI 输出仅供参考，**不构成任何操作建议**。
+- 评论 / 用户展示已剔除个人敏感字段。
+- 本项目**不做**「爆款概率百分比」这类伪精确预测。
 
 ---
 
 ## License
 
 MIT（项目主体代码）。第三方参考项见 [`NOTICE`](./NOTICE) 与 [`OPEN_SOURCE_AUDIT.md`](./OPEN_SOURCE_AUDIT.md)。
-
----
-
-## 注意事项
-
-- 数据来源变化时，采集层可能需要更新。
-- 任何 AI 输出仅供参考，不构成操作建议。
-- 评论/用户展示已剔除个人敏感字段。
-
----
-
-## 路线图
-
-- V0.2：账号生命周期、爆款异常检测、评论语义聚类、热点关联
-- V0.3：内容实验系统（假设 → 选题 → 制作 → 发布 → 数据 → 复盘 → 验证）

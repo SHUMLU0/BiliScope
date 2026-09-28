@@ -2,6 +2,61 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/) 规范。
 
+## [V3.0.1] - 2026-09-28
+
+**维护版**：`V3.0.1 = V3.0 可验证 AI 分析系统的稳定性 / 性能 / UI / 文档维护版`。
+
+不新增研究方向、不重写采集层、不更换数据层 —— 只修复 V3.0.0 已暴露的真实缺陷，
+并把 GitHub 文档整理到与源码一致。全部改动均以「源码 + 最终 dist 构建产物」双重核实。
+
+### Fixed
+
+- **Comment AI 错误使用 200 条原始评论**：`buildCommentAnalyzePrompt()` 自行 `ctx.comments.slice(0, 200)`，
+  绕过了 `prepareCommentAnalysis()` 的 `sampleLimit=120`，把最多 200 条评论原文塞进请求体 ——
+  是 AI 分析慢与 `REQUEST_FAILED` 的主要来源。现在 prompt 只接收 prepare 层产出的**受控样本**，
+  prompt 构造器被禁止再做任何 `slice`。
+- **CommentAnalysis 结构化结果持久化读取错误**：`mapToCommentAnalysis()` 把 `rawResponse` 写成 Provider
+  原始响应，UI 却把它强转成 `CommentAIResult` 消费 —— 语义完全错位。新增
+  `CommentAnalysis.analysisResult`（Zod 校验过的结构化业务结果）作为 UI 唯一可消费来源，
+  `rawResponse` 明确降级为「仅供审计/排错」。
+- **AI 成功后 refresh 覆盖正确 report**：AI 成功后 `refresh()` 会重新读库，用错位的 `rawResponse`
+  覆盖掉内存里正确的报告。现在读取端只认 `analysisResult`，并向后兼容 V3.0.0 旧记录
+  （无结构化结果时显示「该分析为旧版本记录…请重新分析」，**绝不猜测**）。
+- **REQUEST_FAILED 诊断不具体**：所有请求异常一律写成 `REQUEST_FAILED`，用户无法自助修复。
+  新增分类：`REQUEST_TIMEOUT / REQUEST_HTTP_ERROR / REQUEST_NETWORK_ERROR / REQUEST_RATE_LIMITED /
+  REQUEST_CONTEXT_TOO_LARGE / REQUEST_PROVIDER_ERROR`。`AbortError` → `REQUEST_TIMEOUT`；
+  HTTP 413 / 400+过大 → `输入内容过大：请减少 AI 分析样本数量`；429 → `Provider 限流`；
+  模型不存在 → `Model 不存在 / 不可用`。技术细节**禁止为空**。
+- **AI timeout 过短**：默认超时从 30s 提高到 **60s**（不做暴力 180s）；Provider 配置页新增
+  `请求超时 timeoutMs` 选项（30s / 60s / 90s / 120s）。
+- **AI 失败覆盖历史成功结果**：再次分析失败时会清空 `report`，导致用户丢失上一次成功结果。
+  现在失败**不清空、不删库**，UI 明确显示「本次分析失败」+「最近一次成功分析：<时间>」。
+
+### Improved
+
+- **AI sample 与统计基数分离**：采集 200 条 → 统计基于全部 200 条 → AI 只分析受控样本（默认 ≤120）。
+  UI 明确显示 `统计基数：200 · AI 分析样本：120`。新增抽样策略：**高赞样本 / 最新样本 / 多样性样本**。
+  统计与抽样严格分区，采多少就统计多少，**不为了优化 AI 输入而减少本地采集**。
+- **AI UI 前置**：结构调整为 `标题 → BV/采集/AI 分析/AI 历史 → AI 分析状态/AI 分析报告 → 统计事实 →
+  高赞评论 → 本地评论`；顺序以**最终 dist 构建产物**为准验收（新增 `UI-ORDER-001`）。
+- **AI 阶段状态提示**：分析期间显示真实阶段（`准备数据… / 构造分析上下文… / 请求模型… / 校验结果… /
+  保存分析…`）与真实耗时秒数，**不使用假进度百分比**；>10s 提示响应较慢，>30s 提示仍在响应。
+- **AI 输入预算可视化**：分析前估算 `样本条数 / 样本字符数 / facts 字符数 / 总字符数`，
+  UI 显示 `AI 输入：120 条样本 · 约 XXk 字符`；超过安全阈值时提示并建议降低样本量。
+- **GitHub README 与文档结构**：README 全面重写（不再是 V0.1/V0.2/V0.3 的旧文案），
+  与 V3.0.1 真实能力一致；新增「已知限制」如实说明风控 / 环境受限 / Real API 依赖本地 Key /
+  Chrome 自动 E2E 可能受限；开发过程文档迁入 `docs/development/`，规格迁入 `docs/SPEC.md`，
+  并修复全部本地链接（仓库内 **0 死链接**）。
+
+### Tests
+
+新增命名测试：`AI-PERF-001`（200 条 → 统计 200 / AI 样本 ≤120）、`AI-PERF-002`（AI 样本段不泄漏样本外评论）、
+`AI-STORE-001`（SUCCESS 落 `analysisResult`）、`AI-STORE-002`（refresh 后仍完整）、
+`AI-STORE-003`（Provider 原始响应不被当作业务结果）、`AI-STORE-004`（失败保留旧 SUCCESS）、
+`AI-TIMEOUT-001`（AbortError → REQUEST_TIMEOUT）、`AI-ERROR-001`（413 → REQUEST_CONTEXT_TOO_LARGE）、
+`AI-ERROR-002`（429 → REQUEST_RATE_LIMITED）、`UI-ORDER-001`（AI 报告先于统计事实，以 dist 为准）、
+`DOC-001`（README 不再以 V0.1/V0.2/V0.3 为当前版本）、`DOC-002`（README 本地链接全部有效）。
+
 ## [V3.0.0] - 2026-09-28
 
 **「可验证 AI 分析系统」**：不是重写，而是在已验证的 V0.2.2 采集底座之上**重建 AI 层**。
@@ -56,7 +111,7 @@
 ### Added
 
 - 项目骨架与文档（README/LICENSE/NOTICE/ARCHITECTURE/DATA_POLICY/OPEN_SOURCE_AUDIT/CHANGELOG/DEVELOPMENT）
-- SPEC.md 工程规格
+- `docs/SPEC.md` 工程规格
 - 12 张表数据模型（types + Zod + Dexie schema）
 - 5 个 Collector：Creator / Video / Comment / HotTopic / Search
 - AI Service + 4 个 Adapter（OpenAI-compatible / DeepSeek / Gemini / Custom）

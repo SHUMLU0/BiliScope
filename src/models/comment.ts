@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isoString, nonEmpty } from './common';
+import { commentAIResultSchema } from '../ai/schemas';
 
 /**
  * 评论模型（V0.2 · P0-C 升级）。
@@ -98,7 +99,26 @@ export const commentAnalysisSchema = z.object({
   // 支持 / 质疑必须附带原始评论引用 ID（禁止凭空断言）
   citedCommentRpids: z.array(z.string()).default([]),
   uncertaintyNote: z.string().max(5000).default(''),
+  /**
+   * Provider 原始响应（`AnalyzeResponse.raw`），**仅供审计/排错**。
+   * ⚠️ 语义铁律：这里**不是**结构化业务结果，UI 不得把它当 `CommentAIResult` 使用。
+   */
   rawResponse: z.unknown().optional(),
+  /**
+   * V3.0.1 · P0-2：通过 Zod 校验的**结构化业务结果**（`CommentAIResult`）。
+   *
+   * 为什么必须新增这一列：
+   * V3.0.0 把 `rawResponse`（Provider 原始响应，形如 `{choices:[...]}`）当成产品结果，
+   * UI 又把它强转成 `CommentAIResult` 消费 —— 语义完全错位，
+   * 且 AI 成功后 `refresh()` 会再读一次，把内存里正确的 report 覆盖成错位的原始响应。
+   *
+   * 兼容性：V3.0.0 之前写入的旧记录没有本字段 → 读取端必须显示
+   * 「该分析为旧版本记录，未保存结构化产品结果，请重新分析」，**不得猜测、不得回退**。
+   *
+   * 类型用 `.optional()` 而非 `.default(...)`：旧记录必须能被**读出来**（而不是被默认值补全成
+   * 一个假的结构化结果），由 UI 显式区分「有结构化结果」与「旧版本记录」。
+   */
+  analysisResult: commentAIResultSchema.optional(),
 });
 
 export type CommentAnalysis = z.infer<typeof commentAnalysisSchema>;

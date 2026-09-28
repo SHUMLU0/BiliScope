@@ -196,6 +196,114 @@ describe('orchestrate · 成功路径', () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────── V3.0.1 · P0-2 持久化
+describe('V3.0.1 · P0-2 产品结果持久化语义', () => {
+  it('AI-STORE-001: SUCCESS persists the Zod-validated structured result (not the raw response)', async () => {
+    saveCfg();
+    mockSequence([{ content: JSON.stringify(GOOD) }]);
+    const r = await orchestrate(BASE_OPTS);
+    expect(r.ok).toBe(true);
+
+    const stored = (await db.commentAnalyses.toArray())[0]!;
+    // 结构化业务结果必须落库，且内容完整可读
+    expect(stored.analysisResult).toBeTruthy();
+    expect(stored.analysisResult!.summary).toBe('评论区以正面为主');
+    expect(stored.analysisResult!.support[0]!.statement).toBe('认可画质');
+    expect(stored.analysisResult!.themes[0]!.name).toBe('画质');
+
+    // rawResponse 是 Provider 原始响应（OpenAI 风格），**不是**业务结果
+    const raw = stored.rawResponse as { choices?: unknown[] } | undefined;
+    expect(raw).toBeTruthy();
+    expect(Array.isArray(raw!.choices)).toBe(true);
+    // 两个字段语义必须不同：原始响应里没有 summary/support
+    expect((raw as Record<string, unknown>).summary).toBeUndefined();
+    expect((stored.rawResponse as unknown) === stored.analysisResult).toBe(false);
+  });
+
+  it('AI-STORE-002: refresh re-reads analysisResult and still shows the full report', async () => {
+    saveCfg();
+    mockSequence([{ content: JSON.stringify(GOOD) }]);
+    await orchestrate(BASE_OPTS);
+
+    // 模拟 UI 的 loadStoredReport：从库里按 videoId 读最新一条
+    const list = await db.commentAnalyses.where('videoId').equals('v_test').reverse().sortBy('createdAt');
+    const latest = list[0]!;
+    const restored = latest.analysisResult!;
+    expect(restored.summary).toBe('评论区以正面为主');
+    expect(restored.support).toHaveLength(1);
+    expect(restored.opposition).toHaveLength(1);
+    expect(restored.themes).toHaveLength(1);
+    expect(restored.findings).toHaveLength(1);
+    expect(restored.needs).toEqual(['提高更新频率']);
+    expect(restored.questions).toEqual(['下期何时出']);
+    expect(restored.uncertainty).toEqual(['样本量小']);
+    expect(restored.nextResearch).toEqual(['补充二级回复']);
+  });
+
+  it('AI-STORE-003: the Provider raw response is never mistaken for a CommentAIResult', async () => {
+    saveCfg();
+    mockSequence([{ content: JSON.stringify(GOOD) }]);
+    await orchestrate(BASE_OPTS);
+
+    const stored = (await db.commentAnalyses.toArray())[0]!;
+    // 旧实现会把 rawResponse 强转成 CommentAIResult —— 那样拿到的字段全是 undefined
+    const wrongCast = stored.rawResponse as Record<string, unknown>;
+    expect(wrongCast.summary).toBeUndefined();
+    expect(wrongCast.themes).toBeUndefined();
+    expect(wrongCast.support).toBeUndefined();
+    // 正确来源才有这些字段
+    expect(stored.analysisResult!.summary).toBeTruthy();
+  });
+
+  it('AI-STORE-004: a later AI failure keeps the previous SUCCESS row intact', async () => {
+    // 第一次：成功
+    saveCfg();
+    mockSequence([{ content: JSON.stringify(GOOD) }]);
+    const ok = await orchestrate(BASE_OPTS);
+    expect(ok.ok).toBe(true);
+    expect(await db.commentAnalyses.count()).toBe(1);
+    const goodId = (await db.commentAnalyses.toArray())[0]!.id;
+
+    // 第二次：限流失败 —— 不得删除 / 覆盖上一次成功结果
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(new Response('rate limit exceeded', { status: 429 })) as unknown as typeof fetch;
+    const bad = await orchestrate(BASE_OPTS);
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.status).toBe('REQUEST_RATE_LIMITED');
+
+    const rows = await db.commentAnalyses.toArray();
+    expect(rows).toHaveLength(1); // 仍是最初那条成功记录
+    expect(rows[0]!.id).toBe(goodId);
+    expect(rows[0]!.analysisResult!.summary).toBe('评论区以正面为主');
+  });
+
+  it('P0-2 兼容性：V3.0.0 旧记录（无 analysisResult）不会被补全成假结果', async () => {
+    // 手工写入一条「旧版本」记录：只有 rawResponse，没有 analysisResult
+    await db.commentAnalyses.add({
+      id: 'ca_legacy',
+      videoId: 'v_legacy',
+      createdAt: new Date(0).toISOString(),
+      model: 'gpt-x',
+      factSummary: '',
+      themeResult: [],
+      sentimentResult: { positive: 0, neutral: 0, negative: 0 },
+      userNeedResult: [],
+      questionResult: [],
+      supportResult: [],
+      oppositionResult: [],
+      citedCommentRpids: [],
+      uncertaintyNote: '',
+      rawResponse: { choices: [{ message: { content: '{"summary":"old"}' } }] },
+    } as never);
+
+    const rows = await db.commentAnalyses.where('videoId').equals('v_legacy').toArray();
+    expect(rows).toHaveLength(1);
+    // 关键：不得从 rawResponse 猜测结构化结果
+    expect(rows[0]!.analysisResult).toBeUndefined();
+  });
+});
+
 describe('orchestrate · 分层失败', () => {
   it('OUTPUT_TRUNCATED: finishReason=length is NOT repaired and reports the real limit', async () => {
     saveCfg();
@@ -280,15 +388,93 @@ describe('orchestrate · 分层失败', () => {
     expect(await db.commentAnalyses.count()).toBe(0);
   });
 
-  it('REQUEST_FAILED: HTTP 401', async () => {
+  // V3.0.1 · P0-4：请求层失败被**分类**，不再一律 REQUEST_FAILED。
+  // 这里同时覆盖 AI-ERROR-001（413 → REQUEST_CONTEXT_TOO_LARGE）
+  // 与 AI-ERROR-002（429 → REQUEST_RATE_LIMITED）。
+  it('REQUEST_HTTP_ERROR: HTTP 401 is classified with the real status code', async () => {
     saveCfg();
     mockSequence([{ content: '', status: 401 }]);
     const r = await orchestrate(BASE_OPTS);
     expect(r.ok).toBe(false);
     if (!r.ok) {
-      expect(r.status).toBe('REQUEST_FAILED');
-      expect(r.retryable).toBe(true);
+      expect(r.status).toBe('REQUEST_HTTP_ERROR');
+      expect(r.retryable).toBe(false); // 401 认证失败不可重试
       expect(r.detail).toMatch(/401/);
+    }
+  });
+
+  it('AI-ERROR-001: HTTP 413 (context too large) → REQUEST_CONTEXT_TOO_LARGE', async () => {
+    saveCfg();
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response('request entity too large: maximum context length exceeded', { status: 413 }),
+    ) as unknown as typeof fetch;
+    const r = await orchestrate(BASE_OPTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.status).toBe('REQUEST_CONTEXT_TOO_LARGE');
+      expect(r.retryable).toBe(false); // 必须减少样本，重试无意义
+      expect(r.message).toMatch(/输入内容过大/);
+      expect(r.detail).toBeTruthy();
+    }
+    expect(await db.commentAnalyses.count()).toBe(0);
+  });
+
+  it('AI-ERROR-002: HTTP 429 → REQUEST_RATE_LIMITED', async () => {
+    saveCfg();
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue(new Response('rate limit exceeded', { status: 429 })) as unknown as typeof fetch;
+    const r = await orchestrate(BASE_OPTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.status).toBe('REQUEST_RATE_LIMITED');
+      expect(r.retryable).toBe(true);
+      expect(r.message).toMatch(/限流/);
+    }
+    expect(await db.commentAnalyses.count()).toBe(0);
+  });
+
+  it('AI-TIMEOUT-001: AbortError (timeout) → REQUEST_TIMEOUT, not REQUEST_FAILED', async () => {
+    saveCfg();
+    const abort = new Error('The operation was aborted.');
+    abort.name = 'AbortError';
+    globalThis.fetch = vi.fn().mockRejectedValue(abort) as unknown as typeof fetch;
+    const r = await orchestrate(BASE_OPTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.status).toBe('REQUEST_TIMEOUT');
+      expect(r.retryable).toBe(true);
+      expect(r.message).toMatch(/超时/);
+      expect(r.detail).toBeTruthy(); // 禁止「技术细节：空」
+    }
+  });
+
+  it('REQUEST_NETWORK_ERROR: DNS/CORS failure is classified as a network error', async () => {
+    saveCfg();
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new TypeError('Failed to fetch')) as unknown as typeof fetch;
+    const r = await orchestrate(BASE_OPTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.status).toBe('REQUEST_NETWORK_ERROR');
+      expect(r.detail).toMatch(/Failed to fetch/);
+    }
+  });
+
+  it('REQUEST_PROVIDER_ERROR: unknown model is reported as a provider error', async () => {
+    saveCfg();
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ error: { message: 'The model `gpt-nope` does not exist' } }),
+      text: async () => '',
+    }) as unknown as typeof fetch;
+    const r = await orchestrate(BASE_OPTS);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.status).toBe('REQUEST_PROVIDER_ERROR');
+      expect(r.message).toMatch(/Model 不存在/);
     }
   });
 

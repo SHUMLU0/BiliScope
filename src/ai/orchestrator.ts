@@ -31,11 +31,13 @@ import {
 } from './schemas';
 import { zodToStrictJsonSchema } from './json-schema';
 import {
+  classifyRequestError,
   describeFailure,
   isRefusalFinish,
   isTruncatedFinish,
   type AIFailureCode,
 } from './failures';
+import { DEFAULT_TIMEOUT_MS } from './openai-adapter';
 import type { AnalyzeRequest, AnalyzeResponse, ProviderConfig, ProviderName } from './types';
 import type { AIAnalysis, CommentAnalysis } from '@models/index';
 
@@ -169,6 +171,12 @@ export function auditCitations(data: CommentAIResult, knownRpids: string[] | und
  *
  * `AIAnalysis = 审计`（保留完整 prompt/raw/token/finishReason）
  * `CommentAnalysis = 产品结果`（用户真正看到的）
+ *
+ * ⚠️ V3.0.1 · P0-2 语义修正（两个字段分工必须清楚）：
+ *   - `rawResponse`    = **Provider 原始响应**（`AnalyzeResponse.raw`，形如 `{choices:[...]}`）→ 仅审计/排错
+ *   - `analysisResult` = **通过 Zod 校验的结构化业务结果**（`CommentAIResult`）→ UI 唯一可消费来源
+ * V3.0.0 把 `rawResponse` 写成了业务结果，UI 又强转成 `CommentAIResult`，
+ * 且 `refresh()` 会再读一次把内存正确结果覆盖掉 —— 这是真实缺陷。
  */
 export function mapToCommentAnalysis(
   result: CommentAIResult,
@@ -216,7 +224,11 @@ export function mapToCommentAnalysis(
     oppositionResult,
     citedCommentRpids: [...cited],
     uncertaintyNote: uncertaintyNote.slice(0, 5000),
+    // ── V3.0.1 · P0-2：两个字段语义分离 ──
+    // Provider 原始响应：仅供审计/排错，**不是**业务结果
     rawResponse: meta.raw,
+    // 通过 Zod 校验的结构化业务结果：UI 唯一可消费来源
+    analysisResult: result,
   };
 }
 
@@ -329,14 +341,14 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       requestCount: 1,
     });
   } catch (e) {
-    const detail = e instanceof Error ? e.message : String(e);
-    const info = describeFailure('REQUEST_FAILED', detail);
+    // V3.0.1 · P0-4：把异常**分类**为具体失败码（超时 / 限流 / 上下文过大 / 网络 / HTTP）
+    const info = classifyRequestError(e, preCfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     return {
       ok: false,
-      status: 'REQUEST_FAILED',
+      status: info.code,
       message: info.message,
       retryable: info.retryable,
-      detail,
+      detail: info.detail,
       auditId: null,
       rawText: '',
       requestCount: 1,
@@ -428,13 +440,15 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
         }
       }
     } catch (e) {
-      // 修复请求本身失败：仍以第 1 次的失败为准，不掩盖真实原因
+      // 修复请求本身失败：仍以第 1 次的失败为准，不掩盖真实原因。
+      // V3.0.1 · P0-4：把修复请求的异常也分类（超时/限流等），写进 issues 明细。
+      const repairInfo = classifyRequestError(e, preCfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
       validation = {
         ok: false,
         error: firstFailureCode,
         issues: [
           ...(validation.ok ? [] : validation.issues),
-          `自动修复请求失败：${e instanceof Error ? e.message : String(e)}`,
+          `自动修复请求失败：${repairInfo.code} · ${repairInfo.message} · ${repairInfo.detail ?? ''}`.trim(),
         ],
       };
     }

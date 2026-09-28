@@ -380,8 +380,21 @@ async function main(): Promise<void> {
       knownRpids: ['101', '102', '103'],
     });
     const sentMaxTokens = Number(bodies[0]?.max_tokens ?? 0);
-    const stored = (await db.commentAnalyses.toArray()).length;
+    const storedRows = await db.commentAnalyses.toArray();
+    const stored = storedRows.length;
     const audits = (await db.aiAnalyses.toArray()).length;
+
+    // V3.0.1 · P0-2：产品结果必须落库到 analysisResult（结构化业务结果），
+    // rawResponse 仅作审计用途，UI 不得消费 rawResponse。
+    // 注意：rawResponse 是 Provider 原始响应对象（z.unknown()），不是字符串。
+    const persisted = storedRows[0];
+    const hasAnalysisResult = persisted?.analysisResult !== undefined && persisted?.analysisResult !== null;
+    const persistedSummaryOk = persisted?.analysisResult?.summary === GOOD_RESULT.summary;
+    // 审计字段必须存在，但**不得**等同于结构化业务结果（否则就是 P0-2 的错位缺陷）
+    const rawIsAudit =
+      persisted?.rawResponse !== undefined &&
+      persisted?.rawResponse !== null &&
+      !(typeof persisted.rawResponse === 'object' && 'summary' in (persisted.rawResponse as object));
 
     if (
       cfgOk &&
@@ -392,13 +405,17 @@ async function main(): Promise<void> {
       stored === 1 &&
       audits === 1 &&
       sentMaxTokens >= 4096 &&
-      res.requestCount === 1
+      res.requestCount === 1 &&
+      hasAnalysisResult &&
+      persistedSummaryOk &&
+      rawIsAudit
     ) {
       record(
         'TEST 008',
         'AI 配置模型调用',
         'PASS',
-        `orchestrate SUCCESS data.summary 正确 / max_tokens=${sentMaxTokens}(≥4096) / CommentAnalysis=1 AIAnalysis=1 / requests=${res.requestCount}`,
+        `orchestrate SUCCESS data.summary 正确 / max_tokens=${sentMaxTokens}(≥4096) / CommentAnalysis=1 AIAnalysis=1 / ` +
+          `analysisResult 已落库且 summary 一致 / rawResponse 仅审计 / requests=${res.requestCount}`,
       );
     } else {
       record(
@@ -406,7 +423,8 @@ async function main(): Promise<void> {
         'AI 配置模型调用',
         'FAIL',
         `cfgOk=${cfgOk} ok=${res.ok} status=${res.ok ? res.status : (res as { status: string }).status} ` +
-          `maxTokens=${sentMaxTokens} stored=${stored} audits=${audits}`,
+          `maxTokens=${sentMaxTokens} stored=${stored} audits=${audits} ` +
+          `analysisResult=${hasAnalysisResult} summaryOk=${persistedSummaryOk} rawIsAudit=${rawIsAudit}`,
       );
     }
 

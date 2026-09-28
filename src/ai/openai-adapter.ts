@@ -36,6 +36,13 @@ interface ChatResp {
 /** 任务默认生成上限（V3.0 · 第四节：不再是一律 1024） */
 export const DEFAULT_MAX_TOKENS = 2048;
 
+/**
+ * V3.0.1 · P0-4：默认请求超时 60s。
+ * V3.0.0 是 30s —— 对「结构化 JSON + 4096 输出上限」的评论分析明显偏短，
+ * 会在模型正常但较慢时误报 `REQUEST_FAILED`。60s 是保守且有依据的上调（不做暴力 180s）。
+ */
+export const DEFAULT_TIMEOUT_MS = 60_000;
+
 export class OpenAICompatibleAdapter implements AIProvider {
   readonly name: ProviderConfig['name'];
   constructor(private cfg: ProviderConfig) {
@@ -97,7 +104,8 @@ export class OpenAICompatibleAdapter implements AIProvider {
     let responseFormat = this.buildResponseFormat(mode, req);
 
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs ?? 30_000);
+    const timeoutMs = this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const send = async (rf: Record<string, unknown> | null): Promise<ChatResp> => {
         const body = {

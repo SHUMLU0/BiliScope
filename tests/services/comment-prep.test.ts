@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { clearAll } from '@db/database';
-import { prepareCommentAnalysis, serializeCommentFacts } from '@services/comment-prep';
+import {
+  prepareCommentAnalysis,
+  serializeCommentFacts,
+  DEFAULT_SAMPLE_LIMIT,
+} from '@services/comment-prep';
 import { buildCommentAnalyzePrompt } from '@ai/prompts';
 import type { Comment } from '@models/comment';
 
@@ -79,7 +83,9 @@ describe('buildCommentAnalyzePrompt (V0.2 · P0-F)', () => {
     const input = prepareCommentAnalysis([cm({ rpidStr: '7', content: '很好看的内容', like: 2 })]);
     const { system, user } = buildCommentAnalyzePrompt({
       videoId: 'v1',
-      comments: [cm({ rpidStr: '7', content: '很好看的内容', like: 2 })],
+      // V3.0.1 · P0-1：prompt 只接收 prepare 层产出的受控样本
+      sample: input.sample,
+      totalComments: input.total,
       factsJson: serializeCommentFacts(input),
     });
     expect(system).toMatch(/rpid/);
@@ -91,8 +97,113 @@ describe('buildCommentAnalyzePrompt (V0.2 · P0-F)', () => {
   });
 
   it('works without factsJson (backward compatible)', () => {
-    const { user } = buildCommentAnalyzePrompt({ videoId: 'v', comments: [] });
+    const { user } = buildCommentAnalyzePrompt({ videoId: 'v', sample: [] });
     const parsed = JSON.parse(user) as { facts?: unknown };
     expect(parsed.facts).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────── V3.0.1 · P0-1 性能
+describe('V3.0.1 · P0-1 AI 输入受控（统计基数 ≠ AI 样本）', () => {
+  /** 造 200 条评论，like 递增（保证可预测排序） */
+  const many = (n: number): Comment[] =>
+    Array.from({ length: n }, (_, i) =>
+      cm({
+        rpidStr: String(1000 + i),
+        content: `这是第 ${i} 条评论的正文内容，足够长以避免被清洗掉。`,
+        like: i,
+        ctime: 1_700_000_000 + i,
+      }),
+    );
+
+  it('AI-PERF-001: 200 comments → stats uses all 200, AI sample is capped at the default 120', () => {
+    const comments = many(200);
+    const input = prepareCommentAnalysis(comments);
+
+    // 统计基于**全部已采集数据**
+    expect(input.total).toBe(200);
+    expect(input.stats.total).toBe(200);
+
+    // AI 样本受控：≤ 默认 120
+    expect(input.sample.length).toBeLessThanOrEqual(DEFAULT_SAMPLE_LIMIT);
+    expect(input.sample.length).toBe(DEFAULT_SAMPLE_LIMIT);
+    expect(input.budget.sampleCount).toBe(DEFAULT_SAMPLE_LIMIT);
+    expect(input.budget.sampleChars).toBeGreaterThan(0);
+    expect(input.budget.factsChars).toBeGreaterThan(0);
+    expect(input.budget.totalChars).toBe(input.budget.sampleChars + input.budget.factsChars);
+  });
+
+  it('AI-PERF-002: the AI 样本段 NEVER contains comments beyond the sample', () => {
+    const comments = many(200);
+    // 故意把上限压到 5，便于精确定位「第 6 条是否泄漏」
+    const prep = prepareCommentAnalysis(comments, { sampleLimit: 5 });
+    expect(prep.sample).toHaveLength(5);
+
+    const { user } = buildCommentAnalyzePrompt({
+      videoId: 'v1',
+      sample: prep.sample,
+      totalComments: prep.total,
+      factsJson: serializeCommentFacts(prep),
+    });
+
+    const parsedPrompt = JSON.parse(user) as {
+      sample: Array<{ rpid: string }>;
+      sampleCount: number;
+      totalComments: number;
+      facts: unknown;
+    };
+
+    // ① 送入 AI 的 sample 段条数必须等于受控上限，且 rpid 全在样本内
+    expect(parsedPrompt.sample).toHaveLength(5);
+    expect(parsedPrompt.sampleCount).toBe(5);
+    expect(parsedPrompt.totalComments).toBe(200);
+    const sampleIds = new Set(prep.sample.map((s) => s.rpidStr));
+    for (const s of parsedPrompt.sample) expect(sampleIds.has(s.rpid)).toBe(true);
+
+    // ② 样本之外的评论正文不得出现在 sample 段（V3.0.0 slice(0,200) 的缺陷）
+    const sampleContents = prep.sample.map((s) => s.content);
+    const sampleJson = JSON.stringify(parsedPrompt.sample);
+    for (const c of comments) {
+      if (sampleIds.has(c.rpidStr)) continue;
+      // 非样本评论的正文不得整句出现在 sample 段
+      expect(sampleJson.includes(c.content)).toBe(false);
+    }
+
+    // ③ 事实块（facts）是独立段：它按设计保留全量统计与高赞摘要，不属于「AI 样本」
+    expect(parsedPrompt.facts).toBeTruthy();
+    expect(sampleContents.length).toBe(5);
+  });
+
+  it('P0-1: 高赞 / 最新 / 多样性 三种策略产出不同的样本', () => {
+    const comments = many(30);
+
+    const hot = prepareCommentAnalysis(comments, { sampleLimit: 5, sampleStrategy: 'hot' });
+    // 高赞策略：like 最高的在最前
+    expect(hot.sample[0]!.like).toBe(29);
+    expect(hot.sampleStrategy).toBe('hot');
+
+    const latest = prepareCommentAnalysis(comments, { sampleLimit: 5, sampleStrategy: 'latest' });
+    // 最新策略：ctime 最大的在最前
+    expect(latest.sample[0]!.ctime).toBe(1_700_000_000 + 29);
+    expect(latest.sampleStrategy).toBe('latest');
+
+    const diverse = prepareCommentAnalysis(comments, { sampleLimit: 5, sampleStrategy: 'diverse' });
+    // 多样性策略：不应等同于纯高赞 Top5
+    const hotIds = hot.sample.map((s) => s.rpidStr).join(',');
+    const diverseIds = diverse.sample.map((s) => s.rpidStr).join(',');
+    expect(diverse.sampleStrategy).toBe('diverse');
+    expect(diverse.sample).toHaveLength(5);
+    expect(diverseIds).not.toBe(hotIds);
+  });
+
+  it('P0-1: 采样策略不影响统计事实', () => {
+    const comments = many(200);
+    const a = prepareCommentAnalysis(comments, { sampleStrategy: 'hot' });
+    const b = prepareCommentAnalysis(comments, { sampleStrategy: 'latest' });
+    const c = prepareCommentAnalysis(comments, { sampleStrategy: 'diverse' });
+    // 三种策略下统计完全一致（统计与抽样严格分区）
+    expect(a.stats.total).toBe(b.stats.total);
+    expect(b.stats.total).toBe(c.stats.total);
+    expect(a.total).toBe(c.total);
   });
 });

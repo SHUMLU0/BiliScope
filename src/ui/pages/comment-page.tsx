@@ -8,7 +8,14 @@ import { describeFailure, type AIFailureInfo } from '@ai/failures';
 import type { CommentAIResult } from '@ai/schemas';
 import { CommentAIReport, AIFailureNotice } from '../components/CommentAIReport';
 import { computeCommentStats, countKeywords, topComments } from '@services/analytics';
-import { prepareCommentAnalysis, serializeCommentFacts } from '@services/comment-prep';
+import {
+  prepareCommentAnalysis,
+  serializeCommentFacts,
+  SAMPLE_STRATEGY_LABEL,
+  DEFAULT_SAMPLE_LIMIT,
+  type CommentSampleStrategy,
+  type CommentInputBudget,
+} from '@services/comment-prep';
 import { formatInt, formatPct } from '@utils/time';
 import type { Comment, CommentTier, CommentSort, CommentDepth, CommentAnalysis } from '@models/comment';
 import type { AIAnalysis } from '@models/task';
@@ -20,7 +27,12 @@ type SortKey = 'like' | 'time' | 'reply';
 /** 已存在的产品结果行（来自 commentAnalysisRepo） */
 interface StoredReport {
   record: CommentAnalysis;
-  parsed: CommentAIResult | null;
+  /**
+   * V3.0.1 · P0-2：**结构化业务结果**（来自 `CommentAnalysis.analysisResult`）。
+   * `null` 表示该记录是 V3.0.0 及更早写入的旧记录（未保存结构化结果），UI 必须显式提示重新分析。
+   * ⚠️ 绝不从 `rawResponse` 里取 —— 那是 Provider 原始响应，不是业务结果。
+   */
+  analysisResult: CommentAIResult | null;
 }
 
 export function CommentPage() {
@@ -36,6 +48,10 @@ export function CommentPage() {
   const [depth, setDepth] = useState<CommentDepth>('top');
   // 真实环境诊断（P1）
   const [diag, setDiag] = useState<string>('');
+  // V3.0.1 · P0-1：AI 样本策略（只影响送 AI 的样本，不影响统计基数）
+  const [sampleStrategy, setSampleStrategy] = useState<CommentSampleStrategy>('hot');
+  // V3.0.1 · P0-1/P1-5：AI 样本上限（默认 120；输入过大时优先在这里降，而不是让请求失败）
+  const [aiSampleLimit, setAiSampleLimit] = useState(DEFAULT_SAMPLE_LIMIT);
 
   // ── V3.0：AI 分析状态（强类型，不再是裸字符串） ──
   const [aiBusy, setAiBusy] = useState(false);
@@ -53,6 +69,12 @@ export function CommentPage() {
   const [history, setHistory] = useState<AIAnalysis[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [highlightRpid, setHighlightRpid] = useState<string | null>(null);
+  // V3.0.1 · 第七节：真实阶段 + 已耗时（不编造百分比）
+  const [aiStage, setAiStage] = useState('');
+  const [aiElapsed, setAiElapsed] = useState(0);
+  // V3.0.1 · P1-5：本次实际送入 AI 的输入预算
+  const [aiBudget, setAiBudget] = useState<CommentInputBudget | null>(null);
+  const aiT0 = useRef(0);
 
   const commentRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -62,6 +84,15 @@ export function CommentPage() {
     if (b) setBvid(b);
   }, []);
 
+  // V3.0.1 · 第七节：分析期间每 1s 刷新真实耗时（只有真实秒数，没有假进度条）
+  useEffect(() => {
+    if (!aiBusy) return;
+    const id = setInterval(() => {
+      setAiElapsed(Math.round((performance.now() - aiT0.current) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [aiBusy]);
+
   /** 读取最新一条已落库的 AI 产品结果（刷新后仍可见） */
   const loadStoredReport = useCallback(async (videoId: string): Promise<void> => {
     const list = await commentAnalysisRepo.listByVideo(videoId);
@@ -70,9 +101,10 @@ export function CommentPage() {
       setReport(null);
       return;
     }
-    // 产品结果里的 rawResponse 就是通过 Zod 校验的结构化对象
-    const parsed = (latest.rawResponse ?? null) as CommentAIResult | null;
-    setReport({ record: latest, parsed });
+    // V3.0.1 · P0-2：只认 analysisResult（Zod 校验过的结构化业务结果）。
+    // 绝不再把 rawResponse（Provider 原始响应）当作业务结果 —— 那是 V3.0.0 的语义错位缺陷。
+    const analysisResult = (latest.analysisResult ?? null) as CommentAIResult | null;
+    setReport({ record: latest, analysisResult });
     // 引用完整性：从落库文本反推（产品结果只保留渲染后的引用）
     setAiMeta({
       model: latest.model,
@@ -163,29 +195,43 @@ export function CommentPage() {
     }
     setStatusLevel('info');
     setAiFailure(null);
-    setAiMeta(null);
+    setStatusLevel('info');
     setAiBusy(true);
-    setStatus('AI 分析评论中…（统计事实在前，模型只做解释）');
+    // V3.0.1 · 第七节：真实阶段提示（不编造百分比）
+    setAiStage('准备数据…');
+    aiT0.current = performance.now();
+    setAiElapsed(0);
     try {
-      const prep = prepareCommentAnalysis(comments);
+      // V3.0.1 · P0-1：受控样本（唯一采样入口）
+      const prep = prepareCommentAnalysis(comments, { sampleStrategy, sampleLimit: aiSampleLimit });
+      setAiBudget(prep.budget);
+      setAiStage('构造分析上下文…');
+      const factsJson = serializeCommentFacts(prep);
       const { system, user } = buildCommentAnalyzePrompt({
         videoId: video.id,
-        comments,
-        factsJson: serializeCommentFacts(prep),
+        sample: prep.sample,
+        totalComments: prep.total,
+        factsJson,
         requireCitations: true,
       });
+      setStatus(
+        `AI 分析中 · 统计基数 ${prep.total} 条 · AI 样本 ${prep.sample.length} 条（${SAMPLE_STRATEGY_LABEL[prep.sampleStrategy]}）· 约 ${Math.round(prep.budget.totalChars / 1000)}k 字符`,
+      );
 
+      setAiStage('请求模型…');
       const r = await orchestrateCommentAnalysis({
         videoId: video.id,
         systemPrompt: system,
         userPrompt: user,
-        factsJson: serializeCommentFacts(prep),
-        // 真实存在的 rpid 白名单 —— 用于校验模型引用是否落空
-        knownRpids: comments.map((c) => c.rpidStr),
+        factsJson,
+        // 真实存在的 rpid 白名单 —— 用于校验模型引用是否落空。
+        // 注意：白名单用「样本内」的 rpid，模型只被允许引用它真正看到的评论。
+        knownRpids: prep.sample.map((c) => c.rpidStr),
       });
 
+      setAiStage('校验结果…');
       if (!r.ok) {
-        // V3.0 · 第六节：显示真实失败原因，不再一律「AI 失败」
+        // V3.0 · 第六节 + V3.0.1 · P1-6：显示真实失败原因；**不清空已有成功结果**
         setAiFailure(describeFailure(r.status, r.detail));
         setStatusLevel(r.status === 'OUTPUT_TRUNCATED' ? 'warn' : 'error');
         setStatus(`${r.status} · ${r.message}`);
@@ -197,9 +243,11 @@ export function CommentPage() {
           unknownRpids: [],
           claimsWithoutCitation: 0,
         });
+        // 关键：不 setReport(null)、不删库 —— 最近一次成功分析必须保留
         return;
       }
 
+      setAiStage('保存分析…');
       setReport({
         record: {
           id: r.domainRecordId ?? '',
@@ -216,8 +264,9 @@ export function CommentPage() {
           citedCommentRpids: r.citations.totalCitations ? [] : [],
           uncertaintyNote: r.data.uncertainty.join('\n'),
         },
-        parsed: r.data,
-      });
+        // V3.0.1 · P0-2：产品结果持有结构化业务结果（不是 Provider 原始响应）
+        analysisResult: r.data,
+      } as StoredReport);
       setAiMeta({
         model: r.usedConfig.model,
         durationMs: r.durationMs,
@@ -236,6 +285,7 @@ export function CommentPage() {
       setStatusLevel('error');
       setStatus(`REQUEST_FAILED · ${e instanceof Error ? e.message : String(e)}`);
     } finally {
+      setAiStage('');
       setAiBusy(false);
     }
   };
@@ -266,6 +316,15 @@ export function CommentPage() {
   const keywords = useMemo(() => countKeywords(comments, { topN: 20 }), [comments]);
   const top = useMemo(() => topComments(comments, 5), [comments]);
 
+  /**
+   * V3.0.1 · P0-1/P1-5：AI 输入预览（采样 + 体积估算）。
+   * 纯计算、不发请求；让用户在点「AI 分析」前就知道会送多少条、多大。
+   */
+  const samplePreview = useMemo(
+    () => prepareCommentAnalysis(comments, { sampleStrategy, sampleLimit: aiSampleLimit }),
+    [comments, sampleStrategy, aiSampleLimit],
+  );
+
   // 排序 + 关键词过滤
   const visible = useMemo(() => {
     const kw = filter.trim().toLowerCase();
@@ -279,12 +338,13 @@ export function CommentPage() {
 
   /** 只有被 AI 引用到的评论置顶提示，方便对照 */
   const citedSet = useMemo(() => {
-    if (!report?.parsed) return new Set<string>();
+    const r = report?.analysisResult;
+    if (!r) return new Set<string>();
     const s = new Set<string>();
-    for (const c of report.parsed.support) c.rpid.forEach((r) => s.add(r));
-    for (const c of report.parsed.opposition) c.rpid.forEach((r) => s.add(r));
-    for (const t of report.parsed.themes) t.rpids.forEach((r) => s.add(r));
-    for (const f of report.parsed.findings) f.evidenceRpids.forEach((r) => s.add(r));
+    for (const c of r.support) c.rpid.forEach((x) => s.add(x));
+    for (const c of r.opposition) c.rpid.forEach((x) => s.add(x));
+    for (const t of r.themes) t.rpids.forEach((x) => s.add(x));
+    for (const f of r.findings) f.evidenceRpids.forEach((x) => s.add(x));
     return s;
   }, [report]);
 
@@ -331,6 +391,39 @@ export function CommentPage() {
               <option value="advanced">展开前 100 条二级</option>
             </select>
           </label>
+          {/* V3.0.1 · P0-1：AI 样本策略 —— 只影响送 AI 的样本，统计仍基于全部已采集数据 */}
+          <label className="faint">
+            AI 样本策略
+            <select
+              value={sampleStrategy}
+              onChange={(e) => setSampleStrategy(e.target.value as CommentSampleStrategy)}
+            >
+              {(Object.keys(SAMPLE_STRATEGY_LABEL) as CommentSampleStrategy[]).map((k) => (
+                <option key={k} value={k}>
+                  {SAMPLE_STRATEGY_LABEL[k]}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* V3.0.1 · P1-5：AI 样本上限 —— 输入过大时优先在此降低样本量，而不是让请求失败 */}
+          <label className="faint">
+            AI 样本上限
+            <select
+              value={aiSampleLimit}
+              onChange={(e) => setAiSampleLimit(Number(e.target.value))}
+            >
+              {[60, 80, 120, 160, 200].map((n) => (
+                <option key={n} value={n}>
+                  {n} 条
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="faint">
+          统计基于**全部已采集评论**（{formatInt(comments.length)} 条）；AI 只分析受控代表性样本（
+          {formatInt(samplePreview.budget.sampleCount)} 条 · {SAMPLE_STRATEGY_LABEL[sampleStrategy]} ·
+          约 {formatInt(Math.round(samplePreview.budget.totalChars / 1000))}k 字符）。
         </div>
         <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="按内容 / 用户名过滤" />
         {status && (
@@ -339,12 +432,63 @@ export function CommentPage() {
         {diag && <div className="faint mono" style={{ fontSize: 12 }}>{diag}</div>}
       </section>
 
-      {/* V3.0 · 第十节：结构化 AI 分析报告（替代原来的 <pre>JSON</pre>） */}
+      {/* ══════════════════════════════════════════════════════════════
+          V3.0.1 · P0-3：AI 区域必须**位于统计事实之前**。
+          DOM 顺序（最终 build 已核实）：
+            标题 → BV/采集/AI 分析/AI 历史 → [AI 分析状态] → [AI 分析报告] → 统计事实 → Top → 本地评论
+          ══════════════════════════════════════════════════════════════ */}
+
+      {/* ── AI 分析状态（进行中 / 失败 / 旧版本） ── */}
+      {aiBusy && (
+        <section className="card stack">
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <h3 style={{ margin: 0 }}>AI 分析状态</h3>
+            <span className="faint mono">{aiElapsed}s</span>
+          </div>
+          {/* 真实阶段，不编造百分比 */}
+          <div className="row wrap">
+            {['准备数据…', '构造分析上下文…', '请求模型…', '校验结果…', '保存分析…'].map((s) => (
+              <span key={s} className={s === aiStage ? 'tag warn' : 'tag'}>
+                {s}
+              </span>
+            ))}
+          </div>
+          {/* V3.0.1 · 第七节：慢响应提示（真实秒数） */}
+          {aiElapsed >= 30 ? (
+            <div className="warn">模型仍在响应（{aiElapsed}s）…</div>
+          ) : aiElapsed >= 10 ? (
+            <div className="faint">模型响应较慢（{aiElapsed}s）…</div>
+          ) : null}
+          {aiBudget && (
+            <div className="faint">
+              AI 输入：{aiBudget.sampleCount} 条样本 · 约 {formatInt(Math.round(aiBudget.totalChars / 1000))}k 字符
+              （样本 {formatInt(Math.round(aiBudget.sampleChars / 1000))}k + 事实{' '}
+              {formatInt(Math.round(aiBudget.factsChars / 1000))}k）
+              {aiBudget.overBudget && <span className="warn"> · 输入偏大，建议降低样本量</span>}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* 失败提示：显示真实失败码与原因（不再一律「AI 失败」） */}
       {aiFailure && <AIFailureNotice failure={aiFailure} />}
 
-      {report?.parsed && (
+      {/* V3.0.1 · P1-6：AI 失败但已有历史成功结果 → 明确保留，不覆盖 */}
+      {aiFailure && report && (
+        <section className="card stack">
+          <div className="warn">本次分析失败（{aiFailure.code}），已保留最近一次成功分析。</div>
+          <div className="faint">
+            最近一次成功分析：{report.record.createdAt.slice(0, 19).replace('T', ' ')} · 模型{' '}
+            {report.record.model}
+            {aiBudget ? ` · 本次输入 ${aiBudget.sampleCount} 条样本` : ''}
+          </div>
+        </section>
+      )}
+
+      {/* ── AI 分析报告（结构化业务结果） ── */}
+      {report?.analysisResult && (
         <CommentAIReport
-          result={report.parsed}
+          result={report.analysisResult}
           unknownRpids={aiMeta?.unknownRpids ?? []}
           claimsWithoutCitation={aiMeta?.claimsWithoutCitation ?? 0}
           repaired={aiMeta?.repaired ?? false}
@@ -355,13 +499,17 @@ export function CommentPage() {
         />
       )}
 
-      {report && !report.parsed && (
+      {/* V3.0.1 · P0-2：旧版本记录（无结构化结果）—— 显式提示，绝不猜测 */}
+      {report && !report.analysisResult && (
         <section className="card stack">
-          <h3 style={{ margin: 0 }}>历史 AI 分析结果</h3>
+          <h3 style={{ margin: 0 }}>AI 分析报告</h3>
           <div className="warn">
-            该记录写入于 V3.0 之前，未保存结构化结果，无法做引用定位。请重新执行一次「AI 分析」以获得可验证结果。
+            该分析为旧版本记录，未保存结构化产品结果，请重新分析。
           </div>
-          <div className="faint">模型：{report.record.model} · {report.record.createdAt.slice(0, 19).replace('T', ' ')}</div>
+          <div className="faint">
+            记录时间：{report.record.createdAt.slice(0, 19).replace('T', ' ')} · 模型 {report.record.model}
+            {report.record.rawResponse ? ' · 该记录仅有 Provider 原始响应（不可作为业务结果展示）' : ''}
+          </div>
         </section>
       )}
 

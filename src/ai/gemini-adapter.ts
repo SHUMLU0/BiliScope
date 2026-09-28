@@ -13,6 +13,7 @@
  */
 
 import { logger } from '@utils/logger';
+import { DEFAULT_TIMEOUT_MS } from './openai-adapter';
 import type {
   AIProvider,
   AnalyzeRequest,
@@ -155,8 +156,9 @@ export class GeminiAdapter implements AIProvider {
     };
 
     // 超时统一由 AbortController 包裹整个尝试链
+    // V3.0.1 · P0-4：默认 60s（V3.0.0 为 30s，对结构化长输出偏短）
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs ?? 30_000);
+    const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     try {
       let data: GeminiResp;
       try {

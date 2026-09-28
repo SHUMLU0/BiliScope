@@ -59,6 +59,8 @@ BiliScope/
 ├─ tests/                 # 与 src 同名镜像测试
 ├─ scripts/               # 工具脚本（gitleaks-like、依赖审计）
 ├─ docs/
+│  ├─ SPEC.md            # 本文件
+│  └─ development/       # 开发过程文档（PROGRESS.md / FINAL_AUDIT.md）
 ├─ public/
 ├─ README.md
 ├─ LICENSE
@@ -68,7 +70,7 @@ BiliScope/
 ├─ DATA_POLICY.md
 ├─ CHANGELOG.md
 ├─ DEVELOPMENT.md
-├─ FINAL_AUDIT.md
+├─ DEPLOYMENT.md
 ├─ package.json
 ├─ tsconfig.json
 ├─ vite.config.ts
@@ -187,7 +189,7 @@ AI 输出必须保留 `facts / explanations / uncertainty` 三段式（与原始
 
 - 完成本地 git 仓库全部开发
 - 写完整 commit 历史
-- 在 `FINAL_AUDIT.md` 和最终汇报里明确标注："GitHub 发布因缺少授权未执行"
+- 在 `docs/development/FINAL_AUDIT.md` 和最终汇报里明确标注："GitHub 发布因缺少授权未执行"
 - 不索要密码/Token
 - 用户后续自行 `git remote add origin <url> && git push -u origin main`
 
@@ -195,7 +197,7 @@ AI 输出必须保留 `facts / explanations / uncertainty` 三段式（与原始
 
 ## 13. 验收（TEST 001-011）
 
-按原始指令 §36 逐项跑通，结果写进 `FINAL_AUDIT.md`。失败的项必须明确说明降级方案。
+按原始指令 §36 逐项跑通，结果写进 `docs/development/FINAL_AUDIT.md`。失败的项必须明确说明降级方案。
 
 ---
 

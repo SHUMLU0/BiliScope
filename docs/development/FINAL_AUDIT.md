@@ -1,8 +1,39 @@
-# FINAL_AUDIT.md — BiliScope V3.0.0 最终审计
+# FINAL_AUDIT.md — BiliScope V3.0.1 最终审计
 
-> 生成于 2026-09-28 · 当前版本 **V3.0.0**（「可验证 AI 分析系统」：AI 输出必须是可验证的数据）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-28 · 当前版本 **V3.0.1**（V3.0 可验证 AI 分析系统的稳定性 / 性能 / UI / 文档维护版）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
 >
-> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → **V3.0.0 可验证 AI 分析系统**
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → **V3.0.1 稳定性 / 性能 / UI / 文档维护版**
+
+---
+
+## 0-decies. V3.0.1 维护版（稳定性 / 性能 / UI / 文档）
+
+> 定位：**维护版**，不是 V3.0 的重做，也不是 V3.1。
+> 只修复 V3.0.0 已暴露的真实缺陷，并把 GitHub 文档整理到与源码一致。
+> **不改**：采集层 / CommentCollector / WBI / Dexie 数据层 / 无关业务逻辑；**不删**历史数据与历史审计。
+
+### 已确认并修复的 6 个真实缺陷
+
+| # | 缺陷（用户点名） | 根因（源码实证） | 修复 |
+|---|---|---|---|
+| P0-1 | AI 输入使用了 200 条原始评论 | `src/ai/prompts.ts` `buildCommentAnalyzePrompt()` 自行 `ctx.comments.slice(0, 200)`，绕过 `prepareCommentAnalysis({sampleLimit:120})` | prompt 改为消费 `ctx.sample`（prepare 层产出）；prompt 构造函数**禁止再 slice**；新增 `sampleStrategy`（hot/latest/diverse）；UI 显示「统计基数 · AI 样本」 |
+| P0-2 | 产品结果语义错位 | `mapToCommentAnalysis()` 写 `rawResponse: meta.raw`（Provider 原始响应），`comment-page.tsx` 又 `as CommentAIResult` 消费 | 新增 `CommentAnalysis.analysisResult`（Zod 校验过的结构化结果）；UI 只读 `analysisResult`；`rawResponse` 降级为审计字段 |
+| P0-2b | AI 成功后 refresh 覆盖正确 report | `loadStoredReport()` 从 `rawResponse` 重建 `parsed` | 读取端只认 `analysisResult`；V3.0.0 旧记录显示「旧版本记录…请重新分析」 |
+| P0-4 | `REQUEST_FAILED` 无法诊断 | orchestrator catch 把所有异常压成 `REQUEST_FAILED` | 新增 `classifyRequestError()`：超时/HTTP/网络/限流/上下文过大/Provider 错误分类；默认超时 30s → **60s**；设置页可选 30/60/90/120s；技术细节禁止为空 |
+| P1-6 | AI 失败清空历史成功 | `handleAI()` 失败分支未保留，且 `refresh()` 可能清空 | 失败**不清空 report、不删库**；UI 显示「本次分析失败」+「最近一次成功分析：<时间>」 |
+| P0-3 | AI UI 位置 | 需以**最终 dist 产物**验收，而非源码位置 | 重组为 `标题 → 控件 → AI 状态/报告 → 统计事实 → Top → 本地评论`；`UI-ORDER-001` 直接断言 dist chunk 渲染顺序 |
+
+### 关键不变量（V3.0.1 后成立）
+
+- 采集 200 条 → `stats.total = 200` → AI `sample ≤ 120`（默认），**统计与抽样严格分区**。
+- 只有 `SUCCESS` 写 `CommentAnalysis`，且写入 `analysisResult`。
+- AI 输入预算可估算并在 UI 显示；超阈值时建议降低样本量而非直接失败。
+- 仓库 markdown **0 死链接**；版本号六处对齐 `3.0.1`。
+
+### 真实性边界（本审计不粉饰）
+
+- Real Provider E2E：依赖使用者本地 API Key，仓库内自动化测试使用 **mock fetch** → 报告为 **REAL AI ENVIRONMENT LIMITED**，**不得**当作 `REAL AI PASS`。
+- Chrome E2E：命令行 `--load-extension` 在本机不加载未打包扩展 → **`CHROME_E2E_ENV_LIMITED`**（≠ FAIL）。
 
 ---
 

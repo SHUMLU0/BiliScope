@@ -164,17 +164,41 @@ export function buildVideoAnalyzePrompt(ctx: VideoAnalyzeCtx): { system: string;
   return { system, user };
 }
 
+/** 送入 prompt 的样本条目（由 prepareCommentAnalysis 产出，已清洗 / 去重 / 截断） */
+export interface CommentPromptSample {
+  rpidStr: string;
+  uname: string;
+  content: string;
+  like: number;
+  replyLevel: number;
+}
+
 export interface CommentAnalyzeCtx {
   videoId: string;
-  comments: Comment[];
+  /**
+   * V3.0.1 · P0-1：**已准备好的受控代表性样本**（`prepareCommentAnalysis().sample`）。
+   *
+   * ⚠️ 铁律：prompt 构造器**禁止**自己再做 `slice(0, N)`。
+   * 采样策略属于 prepare 层（高赞/最新/多样性），prompt 层只负责「把给定的样本如实放进 JSON」。
+   * V3.0.0 的缺陷正是这里 `ctx.comments.slice(0, 200)`：它绕过了 prepare 层的 120 条上限，
+   * 把最多 200 条评论原文塞进请求体 —— 是 AI 分析变慢与 `REQUEST_FAILED` 的主要来源。
+   */
+  sample: CommentPromptSample[];
   /** V0.2 · P0-F：客观统计事实（与 AI 推断分离）。由 services/comment-prep 生成。 */
   factsJson?: string;
-  /** V0.2 · P0-F：支持 / 反对观点必须引用这些原始评论 rpid，禁止凭空断言。 */
+  /**
+   * V0.2 · P0-F：支持 / 反对观点必须引用这些原始评论 rpid，禁止凭空断言。
+   * 注意：这是**白名单提示**（提醒模型只能引用样本中出现的 rpid），不参与采样。
+   */
   requireCitations?: boolean;
+  /** 参与统计的评论总数（用于让模型知道「样本是抽样，不是全量」） */
+  totalComments?: number;
 }
 
 export function buildCommentAnalyzePrompt(ctx: CommentAnalyzeCtx): { system: string; user: string } {
   const requireCitations = ctx.requireCitations !== false;
+  // ⚠️ 禁止 slice：样本已在 prepare 层受控。这里只做「如实投影」。
+  const sample = ctx.sample;
   const system = [
     '你是一名 B 站评论区研究分析师。你的输出会被程序用严格的结构校验，任何字段缺失或类型错误都会被判为失败。',
     '区分主题 / 高频问题 / 支持观点 / 反对观点 / 用户痛点 / 情绪 / 争议。',
@@ -183,6 +207,8 @@ export function buildCommentAnalyzePrompt(ctx: CommentAnalyzeCtx): { system: str
       ? 'support / opposition 的每一项都必须带 "rpid" 数组，rpid 只能取样本里真实出现过的值。'
       : '',
     ctx.factsJson ? '系统会先给出「客观统计事实」块；你输出的 facts 必须与该块一致。' : '',
+    '你收到的 sample 是**受控抽样**（不是全部评论）。统计数字以「客观统计事实」块为准；' +
+      '你只能对 sample 里的原文做解释，不得假设样本之外的内容。',
     ...COMMENT_FORBIDDEN,
     ...ANTI_FABRICATION,
     // ⚠️ 只声明一套 schema —— 与 src/ai/schemas.ts 逐字对应
@@ -206,10 +232,13 @@ export function buildCommentAnalyzePrompt(ctx: CommentAnalyzeCtx): { system: str
       videoId: ctx.videoId,
       // V0.2 · P0-F：事实块与样本块分开，明确「已算好的数字」vs「待解释的原文」
       facts,
-      sample: ctx.comments.slice(0, 200).map((c) => ({
+      // V3.0.1 · P0-1：受控样本（prepare 层已清洗 / 去重 / 截断 / 限量）
+      sampleCount: sample.length,
+      totalComments: ctx.totalComments ?? sample.length,
+      sample: sample.map((c) => ({
         rpid: c.rpidStr,
         uname: c.uname,
-        content: c.content.slice(0, 300),
+        content: c.content,
         like: c.like,
         level: c.replyLevel,
       })),
