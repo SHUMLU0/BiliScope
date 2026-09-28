@@ -6,10 +6,12 @@ import { clearAll } from '@db/database';
 
 const PROVIDERS: ProviderName[] = ['openai-compatible', 'deepseek', 'gemini', 'custom'];
 const DEFAULTS: Record<ProviderName, Partial<ProviderConfig>> = {
-  'openai-compatible': { baseUrl: 'https://api.openai.com/v1' },
-  deepseek: { baseUrl: 'https://api.deepseek.com/v1' },
-  gemini: { baseUrl: 'https://generativelanguage.googleapis.com' },
-  custom: { baseUrl: '' },
+  // V3.0.1 · P0-A：主流 Provider 默认支持流式输出（SSE），因此默认开启。
+  // 若探测到端点不支持流式，可在下方自行关闭 → 回退到 120s 非流式。
+  'openai-compatible': { baseUrl: 'https://api.openai.com/v1', supportsStreaming: true },
+  deepseek: { baseUrl: 'https://api.deepseek.com/v1', supportsStreaming: true },
+  gemini: { baseUrl: 'https://generativelanguage.googleapis.com', supportsStreaming: true },
+  custom: { baseUrl: '', supportsStreaming: false },
 };
 
 export function OptionsApp() {
@@ -121,17 +123,32 @@ export function OptionsApp() {
             该 Provider 支持 Structured Outputs（`response_format: json_schema`）— 不确定请留空，将降级为 JSON mode
           </span>
         </label>
-        {/* V3.0.1 · P0-4：请求超时（默认 60s）。超时会明确报 REQUEST_TIMEOUT，而非笼统的 REQUEST_FAILED */}
+        {/* V3.0.1 · P0-A：流式输出开关。长评论分析走 SSE 可避免"总时长硬切断"误报截断 */}
+        <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <input
+            type="checkbox"
+            style={{ width: 'auto' }}
+            checked={cfg.supportsStreaming === true}
+            onChange={(e) => updateCfg({ supportsStreaming: e.target.checked })}
+          />
+          <span className="muted">
+            该 Provider 支持流式输出（SSE）— 推荐开启（长分析不再按总时长切断；连续 120 秒无新响应才超时）
+          </span>
+        </label>
+        {/* V3.0.1 · P0-A：请求超时（仅对非流式链路生效；默认 120s）。
+            超时会明确报 REQUEST_TIMEOUT，而非笼统的 REQUEST_FAILED */}
         <label className="stack" style={{ gap: 4 }}>
-          <span className="muted">请求超时 timeoutMs（默认 60 秒）</span>
+          <span className="muted">
+            非流式请求超时 timeoutMs（默认 120 秒；流式链路按「连续 120 秒无新响应」判定）
+          </span>
           <select
-            value={String(cfg.timeoutMs ?? 60_000)}
+            value={String(cfg.timeoutMs ?? 120_000)}
             onChange={(e) => updateCfg({ timeoutMs: Number(e.target.value) })}
           >
             <option value="30000">30 秒</option>
-            <option value="60000">60 秒（默认）</option>
+            <option value="60000">60 秒</option>
             <option value="90000">90 秒</option>
-            <option value="120000">120 秒</option>
+            <option value="120000">120 秒（默认）</option>
           </select>
         </label>
         <div className="row">

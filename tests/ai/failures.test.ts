@@ -9,6 +9,7 @@ import {
   describeFailure,
   isRefusalFinish,
   isTruncatedFinish,
+  classifyRequestError,
   AI_FAILURE_CODES,
   type AIFailureCode,
 } from '@ai/failures';
@@ -79,5 +80,27 @@ describe('isRefusalFinish', () => {
     expect(isRefusalFinish('stop')).toBe(false);
     expect(isRefusalFinish('MAX_TOKENS')).toBe(false);
     expect(isRefusalFinish(undefined)).toBe(false);
+  });
+});
+
+describe('classifyRequestError · 流式空闲超时（V3.0.1 P0-A）', () => {
+  it('流式空闲超时归为 REQUEST_TIMEOUT，且消息明确说明「连续无新响应」', () => {
+    const info = classifyRequestError(
+      new Error('stream idle timeout: 连续 120 秒没有收到任何新响应'),
+    );
+    expect(info.code).toBe('REQUEST_TIMEOUT');
+    expect(info.message).toContain('连续 120 秒无新响应');
+    expect(info.detail).toBeTruthy();
+  });
+
+  it('普通总时长超时不会被误写成「连续无新响应」', () => {
+    const info = classifyRequestError(new Error('The operation was aborted due to timeout'), 120_000);
+    expect(info.code).toBe('REQUEST_TIMEOUT');
+    expect(info.message).not.toContain('连续');
+  });
+
+  it('detail 永不为空（禁止「技术细节：空」）', () => {
+    const info = classifyRequestError(new Error(''));
+    expect(info.detail && info.detail.length > 0).toBe(true);
   });
 });

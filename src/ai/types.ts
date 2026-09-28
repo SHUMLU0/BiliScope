@@ -25,6 +25,13 @@ export interface ProviderConfig {
   supportsJsonSchema?: boolean;
   /** 该 Provider 是否支持 `response_format: { type: 'json_object' }`（JSON mode）。默认 true。 */
   supportsJsonObject?: boolean;
+  /**
+   * V3.0.1 · P0-A：该 Provider 是否支持**流式输出**（SSE）。
+   *
+   * 优先级：`AnalyzeRequest.stream` → `ProviderConfig.supportsStreaming` → 非流式 fallback。
+   * 不支持流式的 Provider 不应被强制走流式（那只会让原本可用的链路直接坏掉）。
+   */
+  supportsStreaming?: boolean;
 }
 
 /**
@@ -53,6 +60,36 @@ export interface AnalyzeRequest {
    * 由 `zodToJsonSchema` 从领域 schema 生成，避免手写第二套结构。
    */
   jsonSchema?: { name: string; schema: Record<string, unknown>; strict?: boolean };
+  /**
+   * V3.0.1 · P0-A：本次请求是否使用流式输出（SSE）。
+   * 显式设置时优先于 `ProviderConfig.supportsStreaming`。
+   */
+  stream?: boolean;
+  /**
+   * V3.0.1 · P0-A：流式进度回调（仅流式链路触发）。
+   * UI 用它显示「已接收 XX 字符 / 已耗时 XXs」，**不参与**任何业务判定。
+   */
+  onProgress?: (info: StreamProgress) => void;
+}
+
+/**
+ * V3.0.1 · P0-A：流式进度快照。
+ *
+ * 语义严格：
+ *   - `receivedChars` = 已拼接的**有效文本**字符数（不含 SSE 协议开销）
+ *   - `phase`：`waiting_first_byte`（尚未收到首个 chunk）/ `streaming`（已在持续输出）
+ *   - 不提供百分比，因为无法在不解析完整 JSON 的前提下知道"总量"。
+ */
+export interface StreamProgress {
+  phase: 'waiting_first_byte' | 'streaming';
+  /** 从请求发出到现在的毫秒数 */
+  elapsedMs: number;
+  /** 距上一次收到新数据的毫秒数 */
+  sinceLastChunkMs: number;
+  /** 已接收有效文本字符数 */
+  receivedChars: number;
+  /** 已收到的 chunk 数 */
+  chunkCount: number;
 }
 
 /**
@@ -87,6 +124,18 @@ export interface AnalyzeResponse {
   structuredOutput?: StructuredOutputMode;
   /** 实际下发的 max_tokens（如实上报，便于诊断截断原因） */
   usedMaxTokens?: number;
+
+  // ── V3.0.1 · P0-A 新增流式诊断字段 ──
+  /** 本次是否走了流式链路（如实上报） */
+  streamed?: boolean;
+  /** 首个有效 chunk 到达时刻（performance.now，流式才有值） */
+  firstByteAt?: number;
+  /** 最后一次收到有效 chunk 的时刻（performance.now，流式才有值） */
+  lastChunkAt?: number;
+  /** 累计 chunk 数（流式才有值） */
+  chunkCount?: number;
+  /** 累计接收有效文本字符数（流式才有值） */
+  receivedChars?: number;
 }
 
 export interface TestConnectionResult {

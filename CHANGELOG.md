@@ -31,22 +31,39 @@
   `请求超时 timeoutMs` 选项（30s / 60s / 90s / 120s）。
 - **AI 失败覆盖历史成功结果**：再次分析失败时会清空 `report`，导致用户丢失上一次成功结果。
   现在失败**不清空、不删库**，UI 明确显示「本次分析失败」+「最近一次成功分析：<时间>」。
+- **长请求被总时长误判截断（流式升级）**：V3.0.0/V3.0.1 早期适配器用 `setTimeout(() => ctrl.abort(), timeoutMs)`
+  包裹**整条链路**（总时长硬切断，约 30s）。120 条评论的正常分析在 >35s 后会被 Abort，
+  并被错误归因为 `OUTPUT_TRUNCATED`。现改为**流式输出 + 空闲监控**：
+  - OpenAI 兼容：`stream: true` + `stream_options.include_usage`，读取 SSE `data:` 分片增量拼接；
+  - Gemini：`:streamGenerateContent?alt=sse`，增量拼接 `parts[].text`；
+  - JSON.parse + Zod 校验**只在流接收完成后执行一次**；
+  - 超时改为「首字节等待 30s 仅提示、连续 **120s 无新分片**才中止」，**总时长不再是失败条件**；
+  - 空闲中止分类为 `REQUEST_TIMEOUT`，消息明确说明「连续 120 秒无新响应」；
+  - **绝不发送额外探测请求，也不因探测失败杀掉真实请求**。
 
 ### Improved
 
+- **非流式 fallback 默认超时 30s/60s → 120s**：与流式空闲上限一致，避免「支持流式就没问题、
+  不支持流式就超时」的不公平差异；仍可被 `timeoutMs` 覆盖。
+- **新增 Provider 能力 `supportsStreaming`**：优先级 `request.stream` → `provider.supportsStreaming`
+  → 非流式 fallback；设置页新增「流式输出（SSE）」开关与说明（默认开启）。
+- **流式进度 UI（真实数据，无假百分比）**：`请求模型… 18s` → `模型已开始输出 · 23s · 已接收 1,204 字符`
+  → 静默 ≥15s 显示 `模型仍在输出…`；超时显示 `AI 请求超时（连续 120 秒无新响应）`。
+- **`OUTPUT_TRUNCATED` 与 `REQUEST_TIMEOUT` 严格区分**：`OUTPUT_TRUNCATED` **仅在真实 `finishReason`
+  表示 token 上限时**（`length` / `MAX_TOKENS`）出现；网络长静默一律归 `REQUEST_TIMEOUT`。
 - **AI sample 与统计基数分离**：采集 200 条 → 统计基于全部 200 条 → AI 只分析受控样本（默认 ≤120）。
   UI 明确显示 `统计基数：200 · AI 分析样本：120`。新增抽样策略：**高赞样本 / 最新样本 / 多样性样本**。
   统计与抽样严格分区，采多少就统计多少，**不为了优化 AI 输入而减少本地采集**。
 - **AI UI 前置**：结构调整为 `标题 → BV/采集/AI 分析/AI 历史 → AI 分析状态/AI 分析报告 → 统计事实 →
   高赞评论 → 本地评论`；顺序以**最终 dist 构建产物**为准验收（新增 `UI-ORDER-001`）。
-- **AI 阶段状态提示**：分析期间显示真实阶段（`准备数据… / 构造分析上下文… / 请求模型… / 校验结果… /
-  保存分析…`）与真实耗时秒数，**不使用假进度百分比**；>10s 提示响应较慢，>30s 提示仍在响应。
-- **AI 输入预算可视化**：分析前估算 `样本条数 / 样本字符数 / facts 字符数 / 总字符数`，
-  UI 显示 `AI 输入：120 条样本 · 约 XXk 字符`；超过安全阈值时提示并建议降低样本量。
+- **AI 阶段状态提示**：分析期间显示真实阶段（`准备数据… / 构造分析上下文… / 请求模型… /
+  模型已开始输出… / 校验结果… / 保存分析…`）与真实耗时秒数，**不使用假进度百分比**。
+- **AI 输入预算可视化**：分析期间显示 `统计：N 条 · AI 样本：M 条 · AI 输入：约 XXk 字符 · 耗时：XXs`；
+  超过安全阈值时提示并建议降低样本量。
 - **GitHub README 与文档结构**：README 全面重写（不再是 V0.1/V0.2/V0.3 的旧文案），
-  与 V3.0.1 真实能力一致；新增「已知限制」如实说明风控 / 环境受限 / Real API 依赖本地 Key /
-  Chrome 自动 E2E 可能受限；开发过程文档迁入 `docs/development/`，规格迁入 `docs/SPEC.md`，
-  并修复全部本地链接（仓库内 **0 死链接**）。
+  与 V3.0.1 真实能力一致；**新增「AI 流式输出与超时行为」章节**；新增「已知限制」如实说明
+  风控 / 环境受限 / Real API 依赖本地 Key / Chrome 自动 E2E 可能受限；开发过程文档迁入
+  `docs/development/`，规格迁入 `docs/SPEC.md`，并修复全部本地链接（仓库内 **0 死链接**）。
 
 ### Tests
 
@@ -56,6 +73,9 @@
 `AI-TIMEOUT-001`（AbortError → REQUEST_TIMEOUT）、`AI-ERROR-001`（413 → REQUEST_CONTEXT_TOO_LARGE）、
 `AI-ERROR-002`（429 → REQUEST_RATE_LIMITED）、`UI-ORDER-001`（AI 报告先于统计事实，以 dist 为准）、
 `DOC-001`（README 不再以 V0.1/V0.2/V0.3 为当前版本）、`DOC-002`（README 本地链接全部有效）。
+新增流式测试（`tests/ai/streaming.test.ts` + 适配器用例）：超时常量（30s / 120s / 120s）、
+SSE 行解析与跨 chunk 多字节字符、空闲看门狗中止、OpenAI / Gemini 流式增量拼接、
+`request.stream` 优先级、流式 `MAX_TOKENS` 不被掩盖、流式 provider error、连接测试强制非流式。
 
 ### CI
 

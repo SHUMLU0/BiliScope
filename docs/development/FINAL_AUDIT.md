@@ -12,14 +12,15 @@
 > 只修复 V3.0.0 已暴露的真实缺陷，并把 GitHub 文档整理到与源码一致。
 > **不改**：采集层 / CommentCollector / WBI / Dexie 数据层 / 无关业务逻辑；**不删**历史数据与历史审计。
 
-### 已确认并修复的 6 个真实缺陷
+### 已确认并修复的 7 个真实缺陷
 
 | # | 缺陷（用户点名） | 根因（源码实证） | 修复 |
 |---|---|---|---|
 | P0-1 | AI 输入使用了 200 条原始评论 | `src/ai/prompts.ts` `buildCommentAnalyzePrompt()` 自行 `ctx.comments.slice(0, 200)`，绕过 `prepareCommentAnalysis({sampleLimit:120})` | prompt 改为消费 `ctx.sample`（prepare 层产出）；prompt 构造函数**禁止再 slice**；新增 `sampleStrategy`（hot/latest/diverse）；UI 显示「统计基数 · AI 样本」 |
 | P0-2 | 产品结果语义错位 | `mapToCommentAnalysis()` 写 `rawResponse: meta.raw`（Provider 原始响应），`comment-page.tsx` 又 `as CommentAIResult` 消费 | 新增 `CommentAnalysis.analysisResult`（Zod 校验过的结构化结果）；UI 只读 `analysisResult`；`rawResponse` 降级为审计字段 |
 | P0-2b | AI 成功后 refresh 覆盖正确 report | `loadStoredReport()` 从 `rawResponse` 重建 `parsed` | 读取端只认 `analysisResult`；V3.0.0 旧记录显示「旧版本记录…请重新分析」 |
-| P0-4 | `REQUEST_FAILED` 无法诊断 | orchestrator catch 把所有异常压成 `REQUEST_FAILED` | 新增 `classifyRequestError()`：超时/HTTP/网络/限流/上下文过大/Provider 错误分类；默认超时 30s → **60s**；设置页可选 30/60/90/120s；技术细节禁止为空 |
+| P0-4 | `REQUEST_FAILED` 无法诊断 | orchestrator catch 把所有异常压成 `REQUEST_FAILED` | 新增 `classifyRequestError()`：超时/HTTP/网络/限流/上下文过大/Provider 错误分类；技术细节禁止为空 |
+| P0-A | **长请求被总时长硬超时误判截断** | 两个 adapter 都用 `setTimeout(() => ctrl.abort(), timeoutMs)` 包裹**整条链路**（总时长 ≤60s）。120 条评论的正常分析 >35s 会被 Abort，并被错误归因为 `OUTPUT_TRUNCATED` | 改为**流式 + 空闲监控**：`stream:true` / `:streamGenerateContent?alt=sse`；首字节等待 30s 仅提示、**连续 120s 无新分片**才中止（→`REQUEST_TIMEOUT`）；**总时长不再是失败条件**；非流式 fallback 默认超时统一 120s；新增 `supportsStreaming` 能力与 UI 进度 |
 | P1-6 | AI 失败清空历史成功 | `handleAI()` 失败分支未保留，且 `refresh()` 可能清空 | 失败**不清空 report、不删库**；UI 显示「本次分析失败」+「最近一次成功分析：<时间>」 |
 | P0-3 | AI UI 位置 | 需以**最终 dist 产物**验收，而非源码位置 | 重组为 `标题 → 控件 → AI 状态/报告 → 统计事实 → Top → 本地评论`；`UI-ORDER-001` 直接断言 dist chunk 渲染顺序 |
 
@@ -28,6 +29,7 @@
 - 采集 200 条 → `stats.total = 200` → AI `sample ≤ 120`（默认），**统计与抽样严格分区**。
 - 只有 `SUCCESS` 写 `CommentAnalysis`，且写入 `analysisResult`。
 - AI 输入预算可估算并在 UI 显示；超阈值时建议降低样本量而非直接失败。
+- **AI 超时只看「是否有新响应」，不看总时长**：总时长不构成失败条件；`OUTPUT_TRUNCATED` 仅由真实 `finishReason`（`length` / `MAX_TOKENS`）触发，网络长静默一律 `REQUEST_TIMEOUT`。
 - 仓库 markdown **0 死链接**；版本号六处对齐 `3.0.1`。
 
 ### 发布期 CI 缺陷（第 7 个真实缺陷，发现即修复）
@@ -44,7 +46,7 @@
 |---|---|---|
 | typecheck | `tsc --noEmit`（含正控制验证） | **PASS**（EXIT=0 / 输出 0 字节） |
 | lint | `eslint . --ext .ts,.tsx` | **PASS**（0 error / 9 warning，均为 `scripts/` 的 CLI `console`） |
-| test | `vitest run` | **PASS** 348 passed / 2 skipped / 0 failed |
+| test | `vitest run` | **PASS** 381 passed / 2 skipped / 0 failed（35 文件） |
 | build | `vite build` | **PASS**（`comment-C4_muNIS.js` 等产物齐备） |
 | dist 区序验收 | `pnpm test:dist`（严格模式） | **PASS**（3 passed，以 dist 断言） |
 | secret scan | `node scripts/scan-secrets.mjs` | **PASS**（no secrets detected） |

@@ -185,3 +185,116 @@ describe('GeminiAdapter · max_tokens 优先级', () => {
     expect(r.usedMaxTokens).toBe(4096);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V3.0.1 · P0-A：流式（streamGenerateContent?alt=sse）
+// ─────────────────────────────────────────────────────────────────────────────
+
+function geminiSseFetch(
+  events: string[],
+  opts: { status?: number } = {},
+): { calls: () => number; urls: () => string[] } {
+  const urls: string[] = [];
+  let calls = 0;
+  globalThis.fetch = vi.fn(async (url: string) => {
+    calls++;
+    urls.push(String(url));
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const e of events) controller.enqueue(encoder.encode(`data: ${e}\n\n`));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: opts.status ?? 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  }) as unknown as typeof fetch;
+  return { calls: () => calls, urls: () => urls };
+}
+
+function gChunk(text: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    candidates: [{ content: { parts: [{ text }] } }],
+    ...extra,
+  });
+}
+
+describe('GeminiAdapter · V3.0.1 P0-A 流式', () => {
+  it('默认走 streamGenerateContent?alt=sse，并增量拼接 parts[].text', async () => {
+    const cap = geminiSseFetch([
+      gChunk('{"summary":"'),
+      gChunk('增量'),
+      gChunk('拼接"}'),
+      JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 9, totalTokenCount: 12 },
+        modelVersion: 'gemini-2.0-flash-001',
+        responseId: 'resp-s',
+      }),
+    ]);
+    const a = new GeminiAdapter({ ...cfg, supportsStreaming: true });
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', jsonMode: true });
+    expect(cap.urls()[0]).toContain(':streamGenerateContent');
+    expect(cap.urls()[0]).toContain('alt=sse');
+    expect(r.streamed).toBe(true);
+    expect(r.text).toBe('{"summary":"增量拼接"}');
+    expect((r.parsed as { summary: string }).summary).toBe('增量拼接');
+    expect(r.finishReason).toBe('STOP');
+    expect(r.modelVersion).toBe('gemini-2.0-flash-001');
+    expect(r.responseId).toBe('resp-s');
+    expect(r.tokenUsage?.total).toBe(12);
+    expect(r.chunkCount).toBeGreaterThanOrEqual(3);
+    expect(r.receivedChars).toBe('{"summary":"增量拼接"}'.length);
+  });
+
+  it('request.stream=false 强制非流式（URL 回到 generateContent）', async () => {
+    const cap = captureFetch({ candidates: [{ content: { parts: [{ text: '{}' }] } }] });
+    const a = new GeminiAdapter({ ...cfg, supportsStreaming: true });
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', stream: false });
+    expect(r.streamed).toBe(false);
+    expect(cap.url()).toContain(':generateContent?key=');
+    expect(cap.url()).not.toContain('alt=sse');
+  });
+
+  it('provider 未声明支持流式 → 保持非流式链路', async () => {
+    const cap = captureFetch({ candidates: [{ content: { parts: [{ text: '{}' }] } }] });
+    const a = new GeminiAdapter(cfg);
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u' });
+    expect(r.streamed).toBe(false);
+    expect(cap.url()).toContain(':generateContent?key=');
+  });
+
+  it('流式 MAX_TOKENS 仍如实上报（截断不得被流式掩盖）', async () => {
+    geminiSseFetch([
+      gChunk('{"summary":"截断'),
+      JSON.stringify({ candidates: [{ content: { parts: [{ text: '' }] }, finishReason: 'MAX_TOKENS' }] }),
+    ]);
+    const a = new GeminiAdapter({ ...cfg, supportsStreaming: true });
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', jsonMode: true });
+    expect(r.finishReason).toBe('MAX_TOKENS');
+    expect(r.parsed).toBeUndefined();
+    expect(r.parseError).toBeTruthy();
+  });
+
+  it('流式链路捕获 provider error 负载', async () => {
+    geminiSseFetch([JSON.stringify({ error: { message: 'API key not valid' } })]);
+    const a = new GeminiAdapter({ ...cfg, supportsStreaming: true });
+    await expect(a.analyze({ systemPrompt: 's', userPrompt: 'u' })).rejects.toThrow(/API key not valid/);
+  });
+
+  it('流式 HTTP 错误抛错并保留状态码', async () => {
+    globalThis.fetch = vi.fn(async () => new Response('bad', { status: 403 })) as unknown as typeof fetch;
+    const a = new GeminiAdapter({ ...cfg, supportsStreaming: true });
+    await expect(a.analyze({ systemPrompt: 's', userPrompt: 'u' })).rejects.toThrow(/403/);
+  });
+
+  it('testConnection 显式走非流式', async () => {
+    const cap = captureFetch({ candidates: [{ content: { parts: [{ text: 'pong' }] } }] });
+    const a = new GeminiAdapter({ ...cfg, supportsStreaming: true });
+    const r = await a.testConnection();
+    expect(r.ok).toBe(true);
+    expect(cap.url()).toContain(':generateContent?key=');
+  });
+});

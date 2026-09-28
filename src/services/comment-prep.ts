@@ -75,6 +75,11 @@ export interface CommentAnalysisInput {
 
 /** V3.0.1 · P0-1：AI 输入体积估算（供 UI 提示，避免用户「不知道为什么慢」） */
 export interface CommentInputBudget {
+  /**
+   * V3.0.1 · P1：**统计基数**（全部已采集评论数）。
+   * 与 `sampleCount` 严格分区：统计采多少算多少，AI 只看受控样本。
+   */
+  total: number;
   /** AI 样本条数 */
   sampleCount: number;
   /** 样本正文字符数合计 */
@@ -245,6 +250,8 @@ export function prepareCommentAnalysis(
 
   const sampleChars = sample.reduce((n, c) => n + c.content.length + c.uname.length + 16, 0);
   const budget: CommentInputBudget = {
+    // 统计基数（全部采集）与 AI 样本严格分区
+    total: comments.length,
     sampleCount: sample.length,
     sampleChars,
     factsChars: factsJson.length,

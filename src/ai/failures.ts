@@ -125,10 +125,15 @@ export function classifyRequestError(e: unknown, timeoutMs?: number): AIFailureI
   const suffix = timeoutMs ? `（${Math.round(timeoutMs / 1000)}s）` : '';
 
   // 1. 超时：AbortError / 明确超时措辞
+  //    V3.0.1 · P0-A：流式链路的超时原因与「总时长超时」不同 —— 是**连续无新响应**。
+  //    必须如实区分，否则用户会误以为「模型太慢」，实际是「连接已经死了」。
   if (name === 'AbortError' || /abort|timeout|timed out|超时/i.test(msg)) {
+    const isIdleTimeout = /stream idle timeout|连续\s*\d+\s*秒没有收到/i.test(msg);
     return {
       code: 'REQUEST_TIMEOUT',
-      message: `AI 请求超时${suffix}`,
+      message: isIdleTimeout
+        ? 'AI 请求超时（连续 120 秒无新响应，连接可能已中断）'
+        : `AI 请求超时${suffix}`,
       retryable: true,
       detail: msg || name || 'AbortError（未携带消息）',
     };

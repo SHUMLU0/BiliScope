@@ -38,7 +38,7 @@ import {
   type AIFailureCode,
 } from './failures';
 import { DEFAULT_TIMEOUT_MS } from './openai-adapter';
-import type { AnalyzeRequest, AnalyzeResponse, ProviderConfig, ProviderName } from './types';
+import type { AnalyzeRequest, AnalyzeResponse, ProviderConfig, ProviderName, StreamProgress } from './types';
 import type { AIAnalysis, CommentAnalysis } from '@models/index';
 
 /**
@@ -83,6 +83,16 @@ export interface OrchestrateOpts {
   factsJson?: string;
   /** 真实存在的 rpid 白名单：用于校验引用是否落空 */
   knownRpids?: string[];
+  /**
+   * V3.0.1 · P0-A：流式进度回调（透传给 adapter）。
+   * UI 用它显示「模型已开始输出 · 23s · 已接收 XX 字符」；**不参与**任何业务判定。
+   */
+  onProgress?: (info: StreamProgress) => void;
+  /**
+   * V3.0.1 · P0-A：是否强制流式。
+   * 不传时由 adapter 按 `request.stream → provider.supportsStreaming → fallback` 决定。
+   */
+  stream?: boolean;
 }
 
 /** 引用校验结果 */
@@ -327,6 +337,9 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
         ? 'prompt_only'
         : 'json_object',
     jsonSchema,
+    // V3.0.1 · P0-A：流式开关与进度回调（透传到 adapter）
+    stream: opts.stream,
+    onProgress: opts.onProgress,
   };
 
   // ── 2. 第 1 次请求 ──
@@ -423,6 +436,9 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
           maxTokens,
           structuredOutput: baseRequest.structuredOutput,
           jsonSchema,
+          // 修复请求沿用同一流式策略与进度回调，避免「修复一次就退化成硬超时」
+          stream: opts.stream,
+          onProgress: opts.onProgress,
         },
         auditExtra: { repairedFrom: first.audit.id, repairOf: firstFailureCode },
         attempt: 2,
@@ -541,6 +557,10 @@ export async function orchestrateCommentAnalysis(opts: {
   knownRpids: string[];
   provider?: ProviderName;
   maxTokens?: number;
+  /** V3.0.1 · P0-A：流式进度回调（UI 显示「已接收 XX 字符」） */
+  onProgress?: (info: StreamProgress) => void;
+  /** V3.0.1 · P0-A：是否强制流式（不传则按 provider 能力） */
+  stream?: boolean;
 }): Promise<OrchestrateResult> {
   return orchestrate({
     domain: 'comment',
@@ -551,6 +571,8 @@ export async function orchestrateCommentAnalysis(opts: {
     knownRpids: opts.knownRpids,
     provider: opts.provider,
     maxTokens: opts.maxTokens,
+    onProgress: opts.onProgress,
+    stream: opts.stream,
   });
 }
 

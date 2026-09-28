@@ -61,6 +61,37 @@
 
 ---
 
+## AI 流式输出与超时行为
+
+长评论分析（120 条样本 + 大 facts 块）如果只按「总时长」计时，极易在模型正常输出时被误判为**截断**。因此 V3.0.1 起默认走**流式输出**，并把超时模型从「总时长硬切断」改为「空闲监控」。
+
+**流式（默认，推荐）**
+
+- Provider 支持时下发 `stream: true`（OpenAI 兼容）或 `:streamGenerateContent?alt=sse`（Gemini）。
+- 逐条读取 SSE `data:` 分片，**增量拼接**正文，并记录 `firstByteAt` / `lastChunkAt` / `chunkCount` / `receivedChars`。
+- **JSON.parse 与 Zod 校验只在流接收完成后执行一次**（不是每片校验）。
+- 超时策略：
+  1. **首个响应等待 30 秒** —— 只提示「模型尚未返回首个响应」，**不终止请求**。
+  2. 收到**任意有效分片**后进入输出模式，只监控「距上次新数据」的时间。
+  3. **连续 120 秒没有任何新分片** → `AbortController` 终止 → 分类 `REQUEST_TIMEOUT`。
+  4. **没有 30 秒 / 60 秒总时长硬切断** —— 「120 条评论跑 90 秒」不会被误判截断。
+  5. 不发送额外的「探测 AI 请求」，也不会因为探测失败而杀掉真实请求。
+- 进度 UI 全部是**真实数据**：`请求模型… 18s` → `模型已开始输出 · 23s · 已接收 1,204 字符`，**不显示任何假百分比**。
+
+**非流式 fallback（Provider 不支持流式）**
+
+- 默认超时 **120 秒**（可配置 30 / 60 / 90 / 120 秒），UI 显示真实耗时。
+- 仅在超时后报 `REQUEST_TIMEOUT`，不会破坏既有 Provider 的可用性。
+
+**能力开关优先级**：`AnalyzeRequest.stream` → `ProviderConfig.supportsStreaming` → 非流式 fallback。
+
+**截断与超时严格区分**：
+
+- `OUTPUT_TRUNCATED` **仅在真实 `finishReason` 表示 token 上限时**（OpenAI `length` / Gemini `MAX_TOKENS`）才出现。
+- 网络长时间无响应 → `REQUEST_TIMEOUT`，**绝不**伪装成「输出被截断，请提高输出上限」。
+
+---
+
 ## 安装
 
 ```bash
@@ -92,7 +123,9 @@ pnpm build          # 产出 dist/
 
 - **API Key 仅保存在本地**（浏览器存储），**不提交 Git、不写入日志、不进入审计包**。
 - Provider 的 **endpoint / model 必须互相对应**：程序按 Provider 名读取该 Provider 自己的 `baseUrl / apiKey / model`，不会「请求发到 A 端点却标称是 B」。
-- 可配置 `max_tokens`（输出上限）与 `timeoutMs`（请求超时，默认 60 秒）。
+- 可配置 `max_tokens`（输出上限）与 **`supportsStreaming`（流式输出开关，默认开启；不确定时可关闭以回退到非流式）**。
+- `timeoutMs` 仅用于**非流式链路**（默认 120 秒）；流式链路由「连续 120 秒无新响应」判定超时，与总时长无关。
+- 可声明 `supportsJsonSchema`（Structured Outputs 能力）。不确定时留空，程序会自动降级为 JSON mode。
 
 ---
 
@@ -123,9 +156,15 @@ pnpm build          # 产出 dist/
 | 版本 | 定位 |
 |---|---|
 | **V3.0** | **可验证 AI 分析系统**：统一领域契约、Structured Output、Zod 校验、分层失败、引用可验证、失败零落库。 |
-| **V3.0.1** | **AI 输入性能 / 持久化结果 / 超时诊断 / UI 位置 / GitHub 文档整理**。 |
+| **V3.0.1** | **AI 输入性能 / 流式输出与超时诊断 / 持久化结果 / UI 位置 / GitHub 文档整理**。 |
 
 V3.0.1 是一个**维护版**，只修复与打磨，不重写采集层、不更换数据层。
+
+本轮（流式升级）解决的真实问题：
+
+- **长请求被误判截断**：V3.0.0 的适配器用**总时长硬超时**（约 30s）。120 条评论的正常分析在 >35s 后会被 Abort，并被错误归因为 `OUTPUT_TRUNCATED`。
+  现在改为**流式 + 空闲监控**：总时长不再构成失败条件，只有「连续 120 秒无新分片」才中止，并正确报 `REQUEST_TIMEOUT`。
+- **非流式 Provider 的默认超时偏短**：由 30s / 60s 统一上调为 **120s**，与流式空闲上限一致。
 
 ---
 

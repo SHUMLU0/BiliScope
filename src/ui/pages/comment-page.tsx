@@ -6,6 +6,7 @@ import { buildCommentAnalyzePrompt } from '@ai/prompts';
 import { orchestrateCommentAnalysis } from '@ai/orchestrator';
 import { describeFailure, type AIFailureInfo } from '@ai/failures';
 import type { CommentAIResult } from '@ai/schemas';
+import type { StreamProgress } from '@ai/types';
 import { CommentAIReport, AIFailureNotice } from '../components/CommentAIReport';
 import { computeCommentStats, countKeywords, topComments } from '@services/analytics';
 import {
@@ -72,6 +73,9 @@ export function CommentPage() {
   // V3.0.1 · 第七节：真实阶段 + 已耗时（不编造百分比）
   const [aiStage, setAiStage] = useState('');
   const [aiElapsed, setAiElapsed] = useState(0);
+  // V3.0.1 · P0-A：流式实时进度（模型已开始输出 / 已接收 XX 字符）。
+  // 只在流式链路有值；非流式 fallback 保持 null，UI 退回「请求模型… Ns」。
+  const [aiStream, setAiStream] = useState<StreamProgress | null>(null);
   // V3.0.1 · P1-5：本次实际送入 AI 的输入预算
   const [aiBudget, setAiBudget] = useState<CommentInputBudget | null>(null);
   const aiT0 = useRef(0);
@@ -199,6 +203,7 @@ export function CommentPage() {
     setAiBusy(true);
     // V3.0.1 · 第七节：真实阶段提示（不编造百分比）
     setAiStage('准备数据…');
+    setAiStream(null);
     aiT0.current = performance.now();
     setAiElapsed(0);
     try {
@@ -227,6 +232,14 @@ export function CommentPage() {
         // 真实存在的 rpid 白名单 —— 用于校验模型引用是否落空。
         // 注意：白名单用「样本内」的 rpid，模型只被允许引用它真正看到的评论。
         knownRpids: prep.sample.map((c) => c.rpidStr),
+        // V3.0.1 · P0-A：流式进度透传到 UI。
+        // 只更新展示，不参与任何业务判定；收到首个有效 chunk 后才切到「已开始输出」。
+        onProgress: (info) => {
+          setAiStream(info);
+          if (info.phase === 'streaming') {
+            setAiStage('模型已开始输出…');
+          }
+        },
       });
 
       setAiStage('校验结果…');
@@ -286,6 +299,7 @@ export function CommentPage() {
       setStatus(`REQUEST_FAILED · ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setAiStage('');
+      setAiStream(null);
       setAiBusy(false);
     }
   };
@@ -447,23 +461,35 @@ export function CommentPage() {
           </div>
           {/* 真实阶段，不编造百分比 */}
           <div className="row wrap">
-            {['准备数据…', '构造分析上下文…', '请求模型…', '校验结果…', '保存分析…'].map((s) => (
+            {['准备数据…', '构造分析上下文…', '请求模型…', '模型已开始输出…', '校验结果…', '保存分析…'].map((s) => (
               <span key={s} className={s === aiStage ? 'tag warn' : 'tag'}>
                 {s}
               </span>
             ))}
           </div>
-          {/* V3.0.1 · 第七节：慢响应提示（真实秒数） */}
-          {aiElapsed >= 30 ? (
-            <div className="warn">模型仍在响应（{aiElapsed}s）…</div>
+          {/* V3.0.1 · P0-A：流式实时进度（只有真实字符数与真实秒数，没有假百分比） */}
+          {aiStream && aiStream.phase === 'streaming' ? (
+            <div className="faint">
+              模型已开始输出 · {Math.round(aiStream.elapsedMs / 1000)}s · 已接收{' '}
+              {formatInt(aiStream.receivedChars)} 字符
+              {aiStream.chunkCount > 0 ? `（${formatInt(aiStream.chunkCount)} 个 chunk）` : ''}
+            </div>
+          ) : aiElapsed >= 30 ? (
+            /* 首字节等待超过 30s：只提示「模型尚未返回首个响应」，**不终止请求** */
+            <div className="warn">模型尚未返回首个响应（已等待 {aiElapsed}s，仍在等待）…</div>
           ) : aiElapsed >= 10 ? (
             <div className="faint">模型响应较慢（{aiElapsed}s）…</div>
           ) : null}
+          {/* 流式已建立但当前静默 → 提示「仍在输出」而非误判卡死 */}
+          {aiStream && aiStream.phase === 'streaming' && aiStream.sinceLastChunkMs >= 15_000 && (
+            <div className="faint">
+              模型仍在输出…（距上次新数据 {Math.round(aiStream.sinceLastChunkMs / 1000)}s）
+            </div>
+          )}
           {aiBudget && (
             <div className="faint">
-              AI 输入：{aiBudget.sampleCount} 条样本 · 约 {formatInt(Math.round(aiBudget.totalChars / 1000))}k 字符
-              （样本 {formatInt(Math.round(aiBudget.sampleChars / 1000))}k + 事实{' '}
-              {formatInt(Math.round(aiBudget.factsChars / 1000))}k）
+              （统计：{formatInt(aiBudget.total)} 条 · AI 样本：{formatInt(aiBudget.sampleCount)} 条 · AI 输入：约{' '}
+              {formatInt(Math.round(aiBudget.totalChars / 1000))}k 字符 · 耗时：{aiElapsed}s）
               {aiBudget.overBudget && <span className="warn"> · 输入偏大，建议降低样本量</span>}
             </div>
           )}

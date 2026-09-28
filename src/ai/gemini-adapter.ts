@@ -10,15 +10,26 @@
  *     其中 `finishReason=MAX_TOKENS` 必须被如实上报（第四节截断诊断）。
  *  3. `max_tokens` 三级优先级：request.maxTokens → provider.maxTokens → 任务默认值。
  *  4. 若 Provider 不支持 responseSchema（老版本 / 代理），降级为 `responseMimeType` + 本地 Zod。
+ *
+ * V3.0.1 · P0-A 升级（流式优先）：
+ *  5. 默认走 `:streamGenerateContent?alt=sse`，增量拼接 `parts[].text`；
+ *     JSON.parse + Zod 校验**只在流结束后做一次**。
+ *  6. 与 OpenAI 一致的空闲超时模型：无总时长硬切断，连续 120s 无新 chunk 才 Abort。
  */
 
 import { logger } from '@utils/logger';
 import { DEFAULT_TIMEOUT_MS } from './openai-adapter';
+import {
+  STREAM_IDLE_TIMEOUT_MS,
+  consumeSseStream,
+  parseSseDataLines,
+} from './streaming';
 import type {
   AIProvider,
   AnalyzeRequest,
   AnalyzeResponse,
   ProviderConfig,
+  StreamProgress,
   StructuredOutputMode,
   TestConnectionResult,
 } from './types';
@@ -101,15 +112,23 @@ export class GeminiAdapter implements AIProvider {
   readonly name = 'gemini' as const;
   constructor(private cfg: ProviderConfig) {}
 
-  private url(): string {
+  private url(stream: boolean): string {
     const base = this.cfg.baseUrl.replace(/\/$/, '') || 'https://generativelanguage.googleapis.com';
-    return `${base}/v1beta/models/${encodeURIComponent(this.cfg.model)}:generateContent?key=${encodeURIComponent(
+    const method = stream ? 'streamGenerateContent' : 'generateContent';
+    const suffix = stream ? '&alt=sse' : '';
+    return `${base}/v1beta/models/${encodeURIComponent(this.cfg.model)}:${method}?key=${encodeURIComponent(
       this.cfg.apiKey,
-    )}`;
+    )}${suffix}`;
   }
 
   private resolveMaxTokens(req: AnalyzeRequest): number {
     return req.maxTokens ?? this.cfg.maxTokens ?? DEFAULT_MAX_TOKENS;
+  }
+
+  /** 优先级：`request.stream` → `provider.supportsStreaming` → 非流式 fallback */
+  private resolveStreaming(req: AnalyzeRequest): boolean {
+    if (typeof req.stream === 'boolean') return req.stream;
+    return this.cfg.supportsStreaming === true;
   }
 
   private resolveStructuredOutput(req: AnalyzeRequest): StructuredOutputMode {
@@ -119,101 +138,266 @@ export class GeminiAdapter implements AIProvider {
     return 'json_object';
   }
 
-  async analyze(req: AnalyzeRequest): Promise<AnalyzeResponse> {
-    const usedMaxTokens = this.resolveMaxTokens(req);
-    let mode = this.resolveStructuredOutput(req);
-
-    const buildGenerationConfig = (m: StructuredOutputMode): Record<string, unknown> => {
-      const cfg: Record<string, unknown> = {
-        temperature: req.temperature ?? 0.2,
-        maxOutputTokens: usedMaxTokens,
-      };
-      if (m === 'prompt_only') return cfg;
+  private buildBody(req: AnalyzeRequest, m: StructuredOutputMode, usedMaxTokens: number): Record<string, unknown> {
+    const cfg: Record<string, unknown> = {
+      temperature: req.temperature ?? 0.2,
+      maxOutputTokens: usedMaxTokens,
+    };
+    if (m !== 'prompt_only') {
       // responseMimeType 保证「是 JSON」；responseSchema 保证「符合结构」
       cfg.responseMimeType = 'application/json';
       if (m === 'json_schema' && req.jsonSchema) {
         cfg.responseSchema = toGeminiSchema(req.jsonSchema.schema);
       }
-      return cfg;
+    }
+    return {
+      contents: [{ role: 'user', parts: [{ text: `${req.systemPrompt}\n\n${req.userPrompt}` }] }],
+      generationConfig: cfg,
     };
+  }
 
-    const send = async (m: StructuredOutputMode): Promise<GeminiResp> => {
-      const body = {
-        contents: [{ role: 'user', parts: [{ text: `${req.systemPrompt}\n\n${req.userPrompt}` }] }],
-        generationConfig: buildGenerationConfig(m),
-      };
-      const res = await fetch(this.url(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(this.cfg.extraHeaders ?? {}) },
-        body: JSON.stringify(body),
-        credentials: 'omit',
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => '');
-        throw new Error(`HTTP ${res.status}: ${txt.slice(0, 300)}`);
-      }
-      return (await res.json()) as GeminiResp;
-    };
-
-    // 超时统一由 AbortController 包裹整个尝试链
-    // V3.0.1 · P0-4：默认 60s（V3.0.0 为 30s，对结构化长输出偏短）
+  /**
+   * V3.0.1 · P0-A：流式请求（`:streamGenerateContent?alt=sse`）。
+   * 返回与 `GeminiResp` 同形的聚合结构，下游解析代码无需区分。
+   */
+  private async sendStreaming(
+    req: AnalyzeRequest,
+    mode: StructuredOutputMode,
+    usedMaxTokens: number,
+  ): Promise<{ data: GeminiResp; stream: StreamMeta }> {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-    try {
-      let data: GeminiResp;
-      try {
-        data = await send(mode);
-      } catch (e) {
-        // 降级：部分环境 / 代理不支持 responseSchema
-        const msg = e instanceof Error ? e.message : String(e);
-        const schemaUnsupported = mode === 'json_schema' && /400|responseSchema|response_schema|invalid/i.test(msg);
-        if (!schemaUnsupported) throw e;
-        logger.warn('gemini-adapter: responseSchema 不被支持，降级为 responseMimeType 单用');
-        mode = 'json_object';
-        data = await send(mode);
+    const startedAt = performance.now();
+    let lastChunkAt = 0;
+    let firstByteAt = 0;
+    let chunkCount = 0;
+    let receivedChars = 0;
+    let timedOut = false;
+
+    const watchdog = setInterval(() => {
+      const now = performance.now();
+      const idleSince = lastChunkAt === 0 ? startedAt : lastChunkAt;
+      const idleMs = now - idleSince;
+      const phase: StreamProgress['phase'] = firstByteAt === 0 ? 'waiting_first_byte' : 'streaming';
+      req.onProgress?.({
+        phase,
+        elapsedMs: Math.round(now - startedAt),
+        sinceLastChunkMs: Math.round(idleMs),
+        receivedChars,
+        chunkCount,
+      });
+      if (idleMs >= STREAM_IDLE_TIMEOUT_MS) {
+        timedOut = true;
+        ctrl.abort();
       }
+    }, 1000);
 
-      if (data.error?.message) throw new Error(`provider error: ${data.error.message}`);
+    const res = await fetch(this.url(true), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(this.cfg.extraHeaders ?? {}) },
+      body: JSON.stringify(this.buildBody(req, mode, usedMaxTokens)),
+      credentials: 'omit',
+      signal: ctrl.signal,
+    }).catch((e: unknown) => {
+      clearInterval(watchdog);
+      if (timedOut || isAbortError(e)) {
+        throw new Error(
+          `stream idle timeout: 连续 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} 秒没有收到任何新响应`,
+        );
+      }
+      throw e;
+    });
 
-      const cand = data.candidates?.[0];
-      const text = cand?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
+    if (!res.ok) {
+      clearInterval(watchdog);
+      const txt = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status}: ${txt.slice(0, 300)}`);
+    }
+    if (!res.body) {
+      clearInterval(watchdog);
+      throw new Error('stream response has no body');
+    }
 
-      let parsed: unknown = undefined;
-      let parseError: string | undefined;
-      if (req.jsonMode) {
+    // 收到响应头即上报一次 waiting_first_byte，让 UI 尽早显示「请求模型… Ns」
+    req.onProgress?.({
+      phase: 'waiting_first_byte',
+      elapsedMs: Math.round(performance.now() - startedAt),
+      sinceLastChunkMs: Math.round(performance.now() - startedAt),
+      receivedChars: 0,
+      chunkCount: 0,
+    });
+
+    let finishReason: string | undefined;
+    let finishMessage: string | undefined;
+    let responseId: string | undefined;
+    let modelVersion: string | undefined;
+    let usage: GeminiResp['usageMetadata'];
+    let promptFeedback: GeminiResp['promptFeedback'];
+    let text = '';
+
+    try {
+      await consumeSseStream(
+        res.body,
+        (line) => {
+          const { payloads } = parseSseDataLines(line + '\n');
+          for (const payload of payloads) {
+            let chunk: GeminiResp;
+            try {
+              chunk = JSON.parse(payload) as GeminiResp;
+            } catch {
+              continue;
+            }
+            if (chunk.error?.message) throw new Error(`provider error: ${chunk.error.message}`);
+            if (chunk.responseId) responseId = chunk.responseId;
+            if (chunk.modelVersion) modelVersion = chunk.modelVersion;
+            if (chunk.usageMetadata) usage = chunk.usageMetadata;
+            if (chunk.promptFeedback) promptFeedback = chunk.promptFeedback;
+            const cand = chunk.candidates?.[0];
+            const partText = cand?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
+            if (partText.length > 0) {
+              text += partText;
+              receivedChars += partText.length;
+            }
+            if (cand?.finishReason) finishReason = cand.finishReason;
+            if (cand?.finishMessage) finishMessage = cand.finishMessage;
+            const now = performance.now();
+            if (firstByteAt === 0) firstByteAt = now;
+            lastChunkAt = now;
+            chunkCount++;
+            req.onProgress?.({
+              phase: 'streaming',
+              elapsedMs: Math.round(now - startedAt),
+              sinceLastChunkMs: 0,
+              receivedChars,
+              chunkCount,
+            });
+          }
+        },
+        () => timedOut,
+      );
+    } finally {
+      clearInterval(watchdog);
+    }
+
+    if (timedOut) {
+      throw new Error(`stream idle timeout: 连续 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} 秒没有收到任何新响应`);
+    }
+
+    const aggregated: GeminiResp = {
+      candidates: [{ content: { parts: [{ text }] }, finishReason, finishMessage }],
+      promptFeedback,
+      usageMetadata: usage,
+      responseId,
+      modelVersion,
+    };
+
+    return {
+      data: aggregated,
+      stream: { firstByteAt, lastChunkAt, chunkCount, receivedChars },
+    };
+  }
+
+  async analyze(req: AnalyzeRequest): Promise<AnalyzeResponse> {
+    const usedMaxTokens = this.resolveMaxTokens(req);
+    let mode = this.resolveStructuredOutput(req);
+    const useStream = this.resolveStreaming(req);
+
+    const sendNonStreaming = async (m: StructuredOutputMode): Promise<GeminiResp> => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      try {
+        const res = await fetch(this.url(false), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(this.cfg.extraHeaders ?? {}) },
+          body: JSON.stringify(this.buildBody(req, m, usedMaxTokens)),
+          credentials: 'omit',
+          signal: ctrl.signal,
+        });
+        if (!res.ok) {
+          const txt = await res.text().catch(() => '');
+          throw new Error(`HTTP ${res.status}: ${txt.slice(0, 300)}`);
+        }
+        return (await res.json()) as GeminiResp;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    let data: GeminiResp;
+    let streamMeta: StreamMeta | undefined;
+    try {
+      if (useStream) {
+        const r = await this.sendStreaming(req, mode, usedMaxTokens);
+        data = r.data;
+        streamMeta = r.stream;
+      } else {
         try {
-          parsed = JSON.parse(text);
+          data = await sendNonStreaming(mode);
         } catch (e) {
-          parsed = undefined;
-          parseError = e instanceof Error ? e.message : String(e);
+          // 降级：部分环境 / 代理不支持 responseSchema
+          const msg = e instanceof Error ? e.message : String(e);
+          const schemaUnsupported = mode === 'json_schema' && /400|responseSchema|response_schema|invalid/i.test(msg);
+          if (!schemaUnsupported) throw e;
+          logger.warn('gemini-adapter: responseSchema 不被支持，降级为 responseMimeType 单用');
+          mode = 'json_object';
+          data = await sendNonStreaming(mode);
         }
       }
-
-      return {
-        text,
-        parsed,
-        tokenUsage: data.usageMetadata
-          ? {
-              prompt: data.usageMetadata.promptTokenCount ?? 0,
-              completion: data.usageMetadata.candidatesTokenCount ?? 0,
-              total: data.usageMetadata.totalTokenCount ?? 0,
-            }
-          : undefined,
-        raw: data,
-        // ── V3.0 诊断字段 ──
-        finishReason: cand?.finishReason ?? data.promptFeedback?.blockReason,
-        finishMessage: cand?.finishMessage ?? data.promptFeedback?.blockReasonMessage,
-        responseId: data.responseId,
-        modelVersion: data.modelVersion ?? this.cfg.model,
-        rawText: text,
-        parseError,
-        refusal: data.promptFeedback?.blockReason ? data.promptFeedback.blockReasonMessage : undefined,
-        structuredOutput: mode,
-        usedMaxTokens,
-      };
-    } finally {
-      clearTimeout(timer);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const schemaUnsupported =
+        useStream && mode === 'json_schema' && /400|responseSchema|response_schema|invalid/i.test(msg);
+      if (!schemaUnsupported) throw e;
+      logger.warn('gemini-adapter: 流式 + responseSchema 不被支持，降级为 responseMimeType 单用');
+      mode = 'json_object';
+      const r = await this.sendStreaming(req, mode, usedMaxTokens);
+      data = r.data;
+      streamMeta = r.stream;
     }
+
+    if (data.error?.message) throw new Error(`provider error: ${data.error.message}`);
+
+    const cand = data.candidates?.[0];
+    const text = cand?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
+
+    let parsed: unknown = undefined;
+    let parseError: string | undefined;
+    if (req.jsonMode) {
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        parsed = undefined;
+        parseError = e instanceof Error ? e.message : String(e);
+      }
+    }
+
+    return {
+      text,
+      parsed,
+      tokenUsage: data.usageMetadata
+        ? {
+            prompt: data.usageMetadata.promptTokenCount ?? 0,
+            completion: data.usageMetadata.candidatesTokenCount ?? 0,
+            total: data.usageMetadata.totalTokenCount ?? 0,
+          }
+        : undefined,
+      raw: data,
+      // ── V3.0 诊断字段 ──
+      finishReason: cand?.finishReason ?? data.promptFeedback?.blockReason,
+      finishMessage: cand?.finishMessage ?? data.promptFeedback?.blockReasonMessage,
+      responseId: data.responseId,
+      modelVersion: data.modelVersion ?? this.cfg.model,
+      rawText: text,
+      parseError,
+      refusal: data.promptFeedback?.blockReason ? data.promptFeedback.blockReasonMessage : undefined,
+      structuredOutput: mode,
+      usedMaxTokens,
+      // ── V3.0.1 · P0-A 流式诊断字段 ──
+      streamed: useStream,
+      firstByteAt: streamMeta?.firstByteAt,
+      lastChunkAt: streamMeta?.lastChunkAt,
+      chunkCount: streamMeta?.chunkCount,
+      receivedChars: streamMeta?.receivedChars,
+    };
   }
 
   async testConnection(): Promise<TestConnectionResult> {
@@ -224,6 +408,8 @@ export class GeminiAdapter implements AIProvider {
         userPrompt: 'Reply with "pong".',
         temperature: 0,
         maxTokens: 256,
+        // V3.0.1 · P0-A：连接测试显式走非流式
+        stream: false,
       });
       if (!res.text.trim()) {
         return {
@@ -242,4 +428,17 @@ export class GeminiAdapter implements AIProvider {
       };
     }
   }
+}
+
+interface StreamMeta {
+  firstByteAt: number;
+  lastChunkAt: number;
+  chunkCount: number;
+  receivedChars: number;
+}
+
+/** 判断异常是否为 AbortError */
+function isAbortError(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false;
+  return (e as { name?: string }).name === 'AbortError';
 }
