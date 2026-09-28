@@ -31,6 +31,15 @@ describe('HotTopicCollector', () => {
     expect(r.data).toHaveLength(2);
     const persisted = await db.hotTopics.count();
     expect(persisted).toBeGreaterThanOrEqual(2);
+
+    // V0.1.2（P1-9）：再采集一次同一份榜单，行数不能继续增长；stats.updated 反映覆盖更新
+    const r2 = await c.collect({ targetId: '', context: { mode: 'top' } });
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    const persisted2 = await db.hotTopics.count();
+    expect(persisted2).toBe(persisted);
+    expect(r2.stats?.added).toBe(0);
+    expect(r2.stats?.updated).toBe(2);
   });
 
   it('mode=search', async () => {

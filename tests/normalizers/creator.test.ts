@@ -53,11 +53,29 @@ describe('normalizeCreatorTotals', () => {
     const t = normalizeCreatorTotals({ archive: { view: 100 }, article: { view: 50 }, likes: 7 });
     expect(t.totalViews).toBe(150);
     expect(t.totalLikes).toBe(7);
+    expect(t.available).toBe(true);
   });
 
-  it('returns zeros on malformed', () => {
+  it('parses upstat wrapped in code/data envelope', () => {
+    const t = normalizeCreatorTotals({
+      code: 0,
+      data: { archive: { view: 10 }, article: { view: 0 }, likes: 1 },
+    });
+    expect(t.totalViews).toBe(10);
+    expect(t.available).toBe(true);
+  });
+
+  // V0.1.2（P1-6）：拿不到数据时必须是 null，不能用 0 伪装
+  it('returns null (not 0) on malformed / missing', () => {
     const t = normalizeCreatorTotals(null);
-    expect(t.totalViews).toBe(0);
-    expect(t.totalLikes).toBe(0);
+    expect(t.totalViews).toBeNull();
+    expect(t.totalLikes).toBeNull();
+    expect(t.available).toBe(false);
+  });
+
+  it('returns null when B 站 returns risk-control code', () => {
+    const t = normalizeCreatorTotals({ code: -352, message: '风控', data: null });
+    expect(t.totalViews).toBeNull();
+    expect(t.available).toBe(false);
   });
 });

@@ -24,6 +24,55 @@
 - GitHub 仓库推送因当前环境无 `gh` CLI / 无 git credential，未自动执行。
 - Gemini Adapter 实现但 V0.1 不测试（环境无 Key）。
 
+## [V0.1.2] - 2026-09-28
+
+独立验收第二轮：V0.1.1「工程上基本成型」，但真实 B 站链路未通过验收。
+本轮只做指定修复，不做 V0.2、不重做 UI、不做架构重构。
+
+### Fixed — P0
+
+- **P0-1 真正实现 MD5 WBI 签名**
+  - 新增 `src/utils/md5.ts`：纯 JS MD5（RFC 1321），替换掉原来的 SHA-256 截断 32 hex
+  - `w_rid = MD5(sorted_query + mixin_key)`，与 B 站要求字节等价
+  - 顺带修复隐藏 bug：mixin key 抽取原为 `(img_url + sub_url).split('/').pop()`，
+    实际只取到 sub_key，丢了 img_key；现改为分别取两个文件名再拼接
+  - 新增 `buildWbiQuery()`：签名用的 query 与最终请求 URL 的 query 同源生成，
+    并按官方实现过滤 value 里的 `!'()*`
+  - 校验：RFC 1321 标准向量 + Node `crypto` MD5 差分（含中文 / emoji / 10 万字符）
+
+- **P0-2 WBI 接口失败时真正 fallback**
+  - 新增 `src/utils/bili.ts`：`biliCode()` / `isBiliBlocked()` / `hasBiliData()` / `BILI_REFERRER`
+  - 事实：B 站风控是 **HTTP 200 + code=-352/403/412**，不抛异常；原实现只在签名函数抛错时降级，等于形同虚设
+  - CreatorCollector 与 VideoCollector 改为：只要 WBI 响应业务码不可用 / 无 data，就降级到 legacy 接口
+
+- **P0-3 SearchCollector 真实 Chrome 请求链路**
+  - `http.ts` 新增 `referrer` 透传（Referer 是 fetch 的 forbidden header，只能走 referrer init）
+  - 搜索请求带 `https://search.bilibili.com/` 来源；URL 走真实 WBI 签名，签名失败回退未签名，被拦再回退一次
+
+- **P0-4 Radar 的 UP / 播放数据不再丢失**
+  - `Video` 模型新增可选 `authorName` / `authorMid` / `views`
+  - 搜索结果 `creatorId` 由字面量 `search` 改为 `uid:{mid}`
+  - Radar 表格 UP 列显示真实 UP 名，新增「播放」列，时长改用 `formatDuration`
+
+### Fixed — P1
+
+- **P1-5** Import 写入前做真实 Zod 校验：12 张表逐条 `safeParse`，非法行跳过并计数，
+  `previewImport` 上报 `counts / invalid / errors`，`applyImport` 返回 `imported / skipped`
+- **P1-6** 缺失数据不再伪装成 0：`CreatorSnapshot` 的 totals 改 `number | null`，
+  `normalizeCreatorTotals` 返回 `null + available=false`，UI 显示 `–`
+- **P1-7** 评论「新增 N 条」改用真实入库计数：`CollectorOk.stats{added,updated,unchanged}`
+- **P1-8** 缓存命中不再制造采集快照：新增 `cachedWithMeta()`，命中时 `fetched=false` 且不写 snapshot
+- **P1-9** HotTopic 按业务键去重：`hotTopicBusinessId(source,title)`，重复刷新只更新 rank/timestamp
+- **P1-10** Smoke test 从普通 CI 分离：`vitest.config.ts` 排除 `tests/smoke/**`，
+  新增 `vitest.smoke.config.ts` + `pnpm test:smoke`，CI 加 `assert-smoke-isolated.mjs` 守卫，
+  smoke 改为 `workflow_dispatch` 手动触发
+
+### Known limitations（本轮新增）
+
+- WBI 签名**端到端成功**未能在本机证实：当前出口 IP 对 space 系列整体风控，
+  **完全不需要签名的 legacy `acc/info` 同样返回 -799 / -352**（`view`、`upstat` 正常返回 0）。
+  因此 -352 不属于签名算法问题；算法正确性由离线差分测试保证。
+
 ## [V0.1.1] - 2026-09-28
 
 独立验收发现 7 项真实数据链路问题，未要求重构。V0.1.1 按最小修复原则处理：

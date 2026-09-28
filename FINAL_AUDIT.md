@@ -4,6 +4,32 @@
 
 ---
 
+## 0-bis. V0.1.2 修复（独立验收第二轮 · P0 x4 + P1 x6）
+
+第二轮验收结论：V0.1.1 「工程上基本成型」，但**不算真实 B 站链路验收通过**。本轮按指定范围做最小修复（不做 V0.2、不重做 UI、不做架构重构）。
+
+| 编号 | 级别 | 问题 | 修复 | 验证 |
+|---|---|---|---|---|
+| #1 | P0 | `w_rid` 用 SHA-256 截断冒充 MD5，与 B 站要求不等价；且 mixin key 抽取 `(img_url+sub_url).split('/').pop()` 只取到 sub_key | 新增 `src/utils/md5.ts`（RFC 1321 纯 JS）；`w_rid = MD5(query + mixin_key)`；分别取 img/sub 文件名拼接；新增 `buildWbiQuery()` 让签名 query 与请求 URL 同源（含 `!'()*` 过滤） | `tests/utils/md5.test.ts`：RFC 1321 向量 + Node `crypto` 差分（含中文/emoji/10 万字符）；`tests/utils/wbi.test.ts`：w_rid 可复现、参数排序、chr_filter |
+| #2 | P0 | 「WBI 失败降级」只在签名函数抛错时触发；B 站风控是 **HTTP 200 + code=-352/403**，不会抛异常 | 新增 `src/utils/bili.ts`（`biliCode` / `isBiliBlocked` / `hasBiliData` / `BILI_REFERRER`）；Creator + Video 两条链路改为「业务码不可用或 data 缺失 → 降级 legacy」 | `tests/collectors/creator.test.ts`：「wbi/acc/info 返回 -352 时降级到 legacy」；`tests/collectors/video.test.ts`：「WBI 接口返回 -352（HTTP 200）时也要降级」 |
+| #3 | P0 | 搜索链路缺 bilibili 域 Referer（真实 Chrome 下 412），且未走 WBI 签名 | `http.ts` 新增 `referrer` 透传（Referer 是 forbidden header，只能走 fetch `referrer` init）；搜索 URL 走真实 WBI 签名，签名失败回退未签名，被拦再回退一次 | `tests/utils/bili.test.ts`（Referer 常量）；smoke 用例覆盖 search/type |
+| #4 | P0 | Radar 的 UP 列显示字面量 `search`，`play`（播放）被丢弃 | `Video` 新增可选 `authorName` / `authorMid` / `views`；`creatorId` 改 `uid:{mid}`；Radar 新增「播放」列，UP 列显示真实 UP 名，时长改用 `formatDuration` | `tests/collectors/search.test.ts`：断言 `creatorId=uid:67890`、`authorName/authorMid/views` 均保留；无 mid/play 时不伪造 |
+| #5 | P1 | Import 只做 `JSON.parse` + `Array.isArray` 就 bulkPut | 12 张表逐条 Zod `safeParse`；非法行跳过并计数；`previewImport` 上报 `counts/invalid/errors`；`applyImport` 返回 `imported/skipped` | `tests/services/export-import.test.ts`：2 个新 case（非法行被跳过 / 绕过 preview 也校验） |
+| #6 | P1 | upstat 失败 → `totalViews: 0`，把「未知」伪装成「采集到 0」 | `CreatorSnapshot` totals 改 `number \| null`；`normalizeCreatorTotals` 返回 `null + available=false`；UI `formatInt` 显示 `–` | `tests/normalizers/creator.test.ts` + `tests/collectors/creator.test.ts`：断言 `toBeNull()` |
+| #7 | P1 | 评论「本次新增 N 条」用 `r.data.length`（含已存在评论） | `CollectorOk.stats{added,updated,unchanged}`；Comment 页显示「新增 / 已存在 / 抓到」 | `tests/collectors/comment.test.ts`：二次采集 `added=0`、`unchanged=25` |
+| #8 | P1 | 5 分钟缓存命中也写 snapshot，污染时间序列 | 新增 `cachedWithMeta()`；命中时 `fetched=false` 且不写快照 | `tests/collectors/creator.test.ts`：命中后快照数不变，清缓存后再采集才 +1 |
+| #9 | P1 | HotTopic 每次 `newId('ht')` + bulkPut → 刷新一次多一份 | `hotTopicBusinessId(source,title)`（md5 前 16 位）；bulkPut 变 upsert；repo 返回真实 `added/updated` | `tests/normalizers/hot-topic.test.ts` + `tests/collectors/hot-topic.test.ts`：重复采集行数不变、`added=0 / updated=2` |
+| #10 | P1 | smoke test 在 `pnpm test` 里跑 → CI 每次打真实 B 站接口 | `vitest.config.ts` 排除 `tests/smoke/**`；新增 `vitest.smoke.config.ts` + `pnpm test:smoke`；CI 加 `scripts/assert-smoke-isolated.mjs` 守卫；smoke 改 `workflow_dispatch` | `node scripts/assert-smoke-isolated.mjs` ✅；`pnpm test` 135/135 离线 |
+
+**门禁**：typecheck 0 · lint 0 · `pnpm test` 135/135 · `pnpm test:smoke` 4/4 · build OK · 0 secrets · TEST 001-009 PASSED。
+
+**已知限制（诚实记录）**：WBI 签名的**端到端成功**未能在本机证实。实测：
+`view` 与 `upstat` 返回 `code=0`（网络 / UA / Referer 均正常），但**完全不需要签名的 legacy `/x/space/acc/info` 同样返回 -799 / -352**，
+说明当前出口 IP 对 space 系列处于整体风控，因此 `wbi/acc/info` 的 -352 不能归因于签名算法。
+算法本身的正确性由离线测试保证（RFC 1321 向量 + Node crypto 差分），端到端需在低风控 / 带 Cookie 环境复验。
+
+---
+
 ## 0. V0.1.1 修复（独立验收反馈 · 真实数据链路问题）
 
 V0.1 提交后独立验收发现 7 项真实数据链路问题，未要求重构。V0.1.1 按最小修复原则处理：
@@ -156,7 +182,10 @@ V0.1 提交后独立验收发现 7 项真实数据链路问题，未要求重构
 
 ## 7. 风险与已知限制
 
-1. **WBI 签名降级**：`utils/wbi.ts` 当前用 SHA-256 截断代替 MD5（浏览器 Web Crypto 不提供 MD5）。生产部署需替换为纯 JS MD5 + 调用 nav 接口取 img_url / sub_url。已在文件注释中说明。V0.1 暂未在采集链路里实际触发 WBI 签名（搜索 / 列表接口无 WBI 强制），不会立即出错。
+1. **WBI 签名**（V0.1.2 已修复算法，端到端待复验）：`utils/wbi.ts` 已改为真正的纯 JS MD5（`src/utils/md5.ts`），
+   `w_rid = MD5(query + mixin_key)`，与 B 站要求字节等价。但本机出口 IP 对 space 系列整体风控
+   （连无签名的 legacy `acc/info` 都返回 -799 / -352），**端到端成功未证实**，需在低风控环境复验。
+   详见 §0-bis「已知限制」。
 2. **评论 IP 属地缺失**：B 站评论 IP 属地接口要求登录态（X-Bili-Mid 之类）。V0.1 按 §7「不读 Cookie / 不登录」原则显式不做。
 3. **全站雷达为阶段 1**：未做 50w+ UP 主结构化索引，仅支持搜索 + 榜单 + 收藏列表入口。V0.2 路线图中实现。
 4. **icon 占位**：4 个 PNG 是 scripts/generate-icons.mjs 生成的纯色占位（不含设计）。仅满足 Manifest V3 必填。
@@ -169,7 +198,7 @@ V0.1 提交后独立验收发现 7 项真实数据链路问题，未要求重构
 
 | 编号 | 问题 | 修复建议 |
 |---|---|---|
-| TD-01 | WBI 降级实现 | 引入纯 JS MD5 + 接入 nav 拉 mixin_key |
+| TD-01 | ~~WBI 降级实现~~ | ✅ V0.1.2 已解决（纯 JS MD5 + nav 拉 mixin_key）。剩余：端到端需低风控环境复验 |
 | TD-02 | icon 是纯色占位 | 重新设计 / 找设计师 |
 | TD-03 | 全站雷达未做 50w+ 索引 | V0.2 引入按分类 / 标签的 Creator Index |
 | TD-04 | `formatDuration` 不区分 minute / hour / day 的 locale | 后续按 i18n 抽出 |
@@ -191,6 +220,22 @@ V0.1 提交后独立验收发现 7 项真实数据链路问题，未要求重构
 
 ## 10. 最终门禁总结
 
+### V0.1.2（本轮）
+
+| 命令 | 结果 |
+|---|---|
+| `pnpm typecheck` | ✅ EXIT=0 |
+| `pnpm lint` | ✅ EXIT=0 |
+| `pnpm test` | ✅ 135 passed (21 files) EXIT=0（离线，不含 smoke） |
+| `pnpm test:smoke` | ✅ 4 passed（真实网络，手动执行） |
+| `node scripts/assert-smoke-isolated.mjs` | ✅ OK（smoke 未回灌默认测试） |
+| `pnpm build` | ✅ EXIT=0 |
+| `pnpm scan-secrets` | ✅ 0 leaks |
+| `pnpm verify-acceptance` | ✅ TEST 001-009 PASSED（010/011 deferred） |
+| `git push → CI` | ⏸ 见下方 V0.1.1 行 / 本轮 commit 后更新 |
+
+### V0.1.1（上一轮）
+
 | 命令 | 结果 |
 |---|---|
 | `pnpm typecheck` | ✅ EXIT=0 |
@@ -199,4 +244,4 @@ V0.1 提交后独立验收发现 7 项真实数据链路问题，未要求重构
 | `pnpm build` | ✅ EXIT=0（59 files in dist/） |
 | `pnpm scan-secrets` | ✅ 0 leaks |
 | `pnpm verify-acceptance` | ✅ TEST 001-009 PASSED（010/011 deferred） |
-| `git push → CI` | ✅ `https://github.com/SHUMLU0/BiliScope/actions/runs/36411153975` ✓ 1m4s |
+| `git push → CI` | ✅ `https://github.com/SHUMLU0/BiliScope/actions/runs/36413095312` ✓ 35s |

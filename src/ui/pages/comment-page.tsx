@@ -41,7 +41,10 @@ export function CommentPage() {
       setStatus(`失败：${r.error}`);
       return;
     }
-    setStatus(`完成 · 本次新增 ${r.data.length} 条`);
+    // V0.1.2（P1-7）：用真实入库计数，r.data 含已存在评论，不能直接当新增数
+    const added = r.stats?.added ?? 0;
+    const unchanged = r.stats?.unchanged ?? 0;
+    setStatus(`完成 · 本次新增 ${added} 条 · 已存在 ${unchanged} 条 · 本次抓到 ${r.data.length} 条`);
     await refresh();
   };
 

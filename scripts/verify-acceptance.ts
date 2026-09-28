@@ -25,10 +25,24 @@ function record(id: string, name: string, status: TestResult['status'], detail: 
   console.log(`[${status}] ${id} ${name}\n        ${detail}`);
 }
 
+/** nav 响应：WBI 签名链路依赖它（V0.1.2 起 refreshWbi 会真实调用） */
+const NAV_MOCK = {
+  code: 0,
+  data: {
+    wbi_img: {
+      img_url: 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png',
+      sub_url: 'https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png',
+    },
+  },
+};
+
 function fakeFetch(map: Record<string, unknown>): typeof fetch {
   return (async (url: string | URL | Request): Promise<Response> => {
     const u = typeof url === 'string' ? url : url.toString();
-    const hit = Object.entries(map).find(([k]) => u.includes(k));
+    // 长 key 优先：避免 'space/arc/search' 抢在 'space/wbi/arc/search' 前面匹配
+    const hit = Object.entries(map)
+      .sort(([a], [b]) => b.length - a.length)
+      .find(([k]) => u.includes(k));
     if (!hit) {
       throw new Error('unmocked: ' + u);
     }
@@ -82,6 +96,7 @@ async function main(): Promise<void> {
   // TEST 001
   try {
     globalThis.fetch = fakeFetch({
+      'web-interface/nav': NAV_MOCK,
       'acc/info': {
         code: 0,
         data: {
@@ -122,9 +137,15 @@ async function main(): Promise<void> {
   // TEST 003
   try {
     globalThis.fetch = fakeFetch({
+      'web-interface/nav': NAV_MOCK,
       'space/wbi/arc/search': {
         code: 0,
         data: { vlist: [{ bvid: 'BV1xxxxxxxxx', aid: 1, title: 't', pubdate: 1700000000, duration: 100 }] },
+      },
+      // V0.1.2：WBI 被拦时的降级目标（legacy arc/search）
+      'space/arc/search': {
+        code: 0,
+        data: { list: { vlist: [{ bvid: 'BV1xxxxxxxxx', aid: 1, title: 't', pubdate: 1700000000, duration: 100 }] } },
       },
       'web-interface/view': {
         code: 0,
@@ -221,6 +242,7 @@ async function main(): Promise<void> {
       await new Promise((r) => setTimeout(r, 10));
       cacheClear();
       globalThis.fetch = fakeFetch({
+        'web-interface/nav': NAV_MOCK,
         'acc/info': {
           code: 0,
           data: {

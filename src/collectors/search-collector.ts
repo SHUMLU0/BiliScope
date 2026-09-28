@@ -23,6 +23,8 @@ import { logger } from '@utils/logger';
 import { nowIso } from '@utils/time';
 import { newId } from '@utils/id';
 import { secondsToIso } from '@utils/time';
+import { BILI_REFERRER, biliCode, isBiliBlocked } from '@utils/bili';
+import { buildWbiQuery, refreshWbi } from '@utils/wbi';
 import { videoSchema, type Video } from '@models/video';
 import type { Collector, CollectorInput, CollectorResult } from './types';
 
@@ -113,11 +115,17 @@ export function normalizeSearchVideo(raw: unknown, opts: { now?: string } = {}):
     tags = r.tag_list.filter((s): s is string => typeof s === 'string');
   }
 
+  // V0.1.2（P0-4）：UP 与播放信息必须保留，不能像之前那样整条丢掉。
+  // creatorId 用稳定的 uid:{mid}（此前是字面量 'search'，导致 Radar 的 UP 列全是 search）
+  const authorMid = typeof r.mid === 'number' && r.mid > 0 ? r.mid : undefined;
+  const authorName = typeof r.author === 'string' && r.author.trim() ? r.author.trim() : undefined;
+  const views = typeof r.play === 'number' && Number.isFinite(r.play) && r.play >= 0 ? r.play : undefined;
+
   const candidate = {
     id: newId('vd'),
     bvid: r.bvid,
     aid: r.aid,
-    creatorId: 'search',
+    creatorId: authorMid ? `uid:${authorMid}` : 'search',
     title: title.slice(0, 500),
     description: (r.description ?? '').slice(0, 5000),
     cover: isValidUrl(r.pic) ? r.pic : undefined,
@@ -126,6 +134,9 @@ export function normalizeSearchVideo(raw: unknown, opts: { now?: string } = {}):
     category: '', // 搜索接口不返回 tname
     tags: tags.slice(0, 50).map((t) => t.slice(0, 50)),
     url: `https://www.bilibili.com/video/${r.bvid}`,
+    authorName,
+    authorMid,
+    views,
     createdAt: now,
     updatedAt: now,
     source: 'bili-web' as const,
@@ -145,6 +156,45 @@ export function normalizeSearchVideoList(raw: unknown): Video[] {
   return out;
 }
 
+const SEARCH_ENDPOINT = 'https://api.bilibili.com/x/web-interface/search/type';
+
+function encodeQuery(params: Record<string, string | number>): string {
+  return Object.entries(params)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join('&');
+}
+
+/**
+ * 构造搜索 URL。
+ * V0.1.2（P0-3）：
+ *   1. 请求必须带 bilibili 域的 referrer，否则真实 Chrome 里直接 412；
+ *   2. search/type 现已纳入 WBI 签名，用 P0-1 的真实 MD5 生成 w_rid；签名失败才退回未签名 URL。
+ */
+async function buildSearchUrls(
+  keyword: string,
+  page: number,
+  pageSize: number,
+): Promise<{ signedUrl: string | null; plainUrl: string }> {
+  const base: Record<string, string | number> = {
+    search_type: 'video',
+    keyword,
+    page,
+    page_size: pageSize,
+    order: 'pubdate',
+    platform: 'web',
+    web_location: 40020,
+  };
+  const plainUrl = `${SEARCH_ENDPOINT}?${encodeQuery(base)}`;
+  try {
+    await refreshWbi();
+    const query = await buildWbiQuery(base);
+    return { signedUrl: `${SEARCH_ENDPOINT}?${query}`, plainUrl };
+  } catch (e) {
+    logger.warn(`search WBI sign failed, use unsigned url: ${e instanceof Error ? e.message : e}`);
+    return { signedUrl: null, plainUrl };
+  }
+}
+
 export class SearchCollector implements Collector<Video> {
   readonly name = 'search';
 
@@ -155,16 +205,27 @@ export class SearchCollector implements Collector<Video> {
     }
     const page = Number(input.context?.page ?? 1);
     try {
-      const url = `https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=${encodeURIComponent(
-        keyword,
-      )}&page=${page}&page_size=20&order=pubdate&platform=web&web_location=40020`;
-      const res = await httpGet<BiliSearchResp>(url, { signal: input.signal });
-      if (res.code !== 0) {
-        return { ok: false, error: `search code=${res.code} msg=${res.message ?? ''}`, retryable: false };
+      const { signedUrl, plainUrl } = await buildSearchUrls(keyword, page, 20);
+      const opts = { signal: input.signal, referrer: BILI_REFERRER.search };
+
+      let res = await httpGet<BiliSearchResp>(signedUrl ?? plainUrl, opts);
+      // WBI 签名被判无效（HTTP 200 + code != 0）时用未签名 URL 再试一次
+      if (signedUrl && isBiliBlocked(res) && biliCode(res) !== 0) {
+        logger.warn(`search/type WBI 请求被拦（code=${biliCode(res)}），回退未签名 URL`);
+        res = await httpGet<BiliSearchResp>(plainUrl, opts);
+      }
+
+      const code = biliCode(res);
+      if (code !== 0) {
+        return {
+          ok: false,
+          error: `search code=${code ?? 'n/a'} msg=${res.message ?? ''}`,
+          retryable: false,
+        };
       }
       const list = normalizeSearchVideoList(res.data?.result?.video ?? []);
       logger.info(`SearchCollector keyword="${keyword}" page=${page} got ${list.length}`);
-      return { ok: true, data: list, fetched: true };
+      return { ok: true, data: list, fetched: true, stats: { added: list.length, updated: 0, unchanged: 0 } };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const retryable = /timeout|abort|5[0-9]{2}|network|rate/i.test(msg);

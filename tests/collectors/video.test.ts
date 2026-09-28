@@ -139,7 +139,7 @@ describe('VideoCollector', () => {
     expect(r.error).toMatch(/creator not found/);
   });
 
-  it('WBI 失败时降级到带 wts 的请求', async () => {
+  it('WBI 签名失败时降级到 legacy arc/search', async () => {
     await db.creators.add(
       creatorSchema.parse({
         id: 'cr_seed2',
@@ -168,7 +168,14 @@ describe('VideoCollector', () => {
         return new Response('error', { status: 500 });
       }
       if (u.includes('wbi/arc/search')) {
-        // B 站在无 w_rid 时返回 -352
+        // B 站在签名无效时返回 -352（HTTP 200）
+        return new Response(
+          JSON.stringify({ code: -352, message: '风控' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      // V0.1.2：降级目标是 legacy /x/space/arc/search（不带 wbi 前缀）
+      if (u.includes('/x/space/arc/search')) {
         return new Response(
           JSON.stringify({ code: -352, message: '风控' }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -180,16 +187,83 @@ describe('VideoCollector', () => {
 
     const c = new VideoCollector();
     const r = await c.collect({ targetId: '6666666' });
-    // -352 风控下，normalizeVideoList 返回 []，collector 视为 ok 但 data 为空
-    // 核心是验证降级路径被触发（wbi/arc/search 被调用）
+    // nav 失败 → WBI 不可用 → 应当直接走 legacy arc/search
     expect(calls_log.some((u) => u.includes('x/web-interface/nav'))).toBe(true);
-    expect(calls_log.some((u) => u.includes('wbi/arc/search'))).toBe(true);
-    const arcCall = calls_log.find((u) => u.includes('wbi/arc/search'))!;
-    // 降级 URL：仍带 mid=6666666 + pn/ps/order 等基础参数，但不带 w_rid（因 WBI 失败）
-    expect(arcCall).toMatch(/[?&]mid=6666666/);
+    expect(calls_log.some((u) => u.includes('/x/space/arc/search'))).toBe(true);
+    const legacyCall = calls_log.find((u) => u.includes('/x/space/arc/search'))!;
+    expect(legacyCall).toMatch(/[?&]mid=6666666/);
+    expect(legacyCall).not.toContain('w_rid');
     // data 为空，collect 视为成功（无视频可收集不是错误）
     if (r.ok) {
       expect(r.data).toHaveLength(0);
     }
+  }, 15000);
+
+  // V0.1.2（P0-2）：这是原实现最大的漏洞 —— 签名成功但 B 站返回 code=-352（HTTP 200）
+  // 时不会抛异常，原实现会直接把 -352 当成成功结果。现在必须触发降级。
+  it('WBI 接口返回 -352（HTTP 200）时也要降级到 legacy', async () => {
+    await db.creators.add(
+      creatorSchema.parse({
+        id: 'cr_seed3',
+        uid: 5555555,
+        name: 'seed3',
+        avatar: undefined,
+        sign: '',
+        level: 0,
+        followers: 0,
+        following: 0,
+        videoCount: 0,
+        spaceUrl: 'https://space.bilibili.com/5555555/',
+        lastCollectedAt: nowIso(),
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        source: 'manual',
+      }),
+    );
+
+    const calls_log: string[] = [];
+    const mockFetch = vi.fn(async (url: string | URL | Request) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      calls_log.push(u);
+      if (u.includes('x/web-interface/nav')) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              wbi_img: {
+                img_url: 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png',
+                sub_url: 'https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png',
+              },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      // WBI 接口签名"成功"但被风控：HTTP 200 + code=-352
+      if (u.includes('wbi/arc/search')) {
+        return new Response(
+          JSON.stringify({ code: -352, message: '风控' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (u.includes('/x/space/arc/search')) {
+        return new Response(
+          JSON.stringify({ code: 0, data: { list: { vlist: [] } } }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      throw new Error('unmocked: ' + u);
+    }) as unknown as typeof fetch;
+    globalThis.fetch = mockFetch;
+
+    const c = new VideoCollector();
+    const r = await c.collect({ targetId: '5555555' });
+
+    // 关键：wbi/arc/search 被调用过（带 w_rid），随后 legacy 也被调用过
+    const wbiCall = calls_log.find((u) => u.includes('wbi/arc/search'));
+    expect(wbiCall).toBeTruthy();
+    expect(wbiCall).toContain('w_rid=');
+    expect(calls_log.some((u) => u.includes('/x/space/arc/search'))).toBe(true);
+    expect(r.ok).toBe(true);
   }, 15000);
 });

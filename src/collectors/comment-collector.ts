@@ -39,7 +39,14 @@ export class CommentCollector implements Collector<Comment> {
 
       const upserted = await commentRepo.bulkAdd(all);
       logger.info(`CommentCollector bvid=${bvid} added=${upserted.added} unchanged=${upserted.unchanged}`);
-      return { ok: true, data: all, fetched: true };
+      // V0.1.2（P1-7）：data 是本次抓到的全部评论（含已存在），
+      // 「新增几条」必须用 upserted.added，UI 不能再拿 data.length 冒充。
+      return {
+        ok: true,
+        data: all,
+        fetched: true,
+        stats: { added: upserted.added, updated: upserted.updated, unchanged: upserted.unchanged },
+      };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const retryable = /timeout|abort|5[0-9]{2}|network|rate/i.test(msg);

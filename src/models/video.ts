@@ -14,6 +14,11 @@ export const videoSchema = z.object({
   category: z.string().default(''),
   tags: z.array(z.string().max(50)).max(50).default([]),
   url: urlLike,
+  // V0.1.2（P0-4）：全站搜索链路下的 UP 与播放信息。
+  // 这三个字段是「可选」而非默认 0 —— 缺失表示未知，UI 显示 –，不允许伪装成 0。
+  authorName: z.string().max(100).optional(),
+  authorMid: z.number().int().nonnegative().optional(),
+  views: z.number().int().nonnegative().optional(),
   ...baseFields.shape,
 });
 

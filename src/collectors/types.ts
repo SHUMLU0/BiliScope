@@ -6,11 +6,20 @@ export interface CollectorInput {
   signal?: AbortSignal;
 }
 
+/** 写入结果的真实计数（V0.1.2 · P1-7：UI 的「新增 N 条」必须用它，不能用 data.length） */
+export interface CollectorStats {
+  added: number;
+  updated: number;
+  unchanged: number;
+}
+
 export interface CollectorOk<T> {
   ok: true;
   data: T[];
   /** 是否本次触发了网络调用（用于区分缓存命中） */
   fetched: boolean;
+  /** 持久化层的真实新增 / 更新 / 未变化计数 */
+  stats?: CollectorStats;
 }
 
 export interface CollectorErr {

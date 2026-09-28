@@ -173,10 +173,18 @@ export const commentAnalysisRepo = {
 // ─────────────────────────────────────────────────────────── HotTopic
 
 export const hotTopicRepo = {
+  /** V0.1.2（P1-9）：id 现在是业务键（source+title 哈希），bulkPut 即为 upsert，不会堆积重复行 */
   async bulkAdd(topics: HotTopic[]): Promise<UpsertResult> {
     if (!topics.length) return { added: 0, updated: 0, unchanged: 0, ids: [] };
+    const ids = topics.map((t) => t.id);
+    const existingCount = await db.hotTopics.where('id').anyOf(ids).count();
     await db.hotTopics.bulkPut(topics);
-    return { added: topics.length, updated: 0, unchanged: 0, ids: topics.map((t) => t.id) };
+    return {
+      added: topics.length - existingCount,
+      updated: existingCount,
+      unchanged: 0,
+      ids,
+    };
   },
   async listBySource(source: HotTopic['source'], limit = 100): Promise<HotTopic[]> {
     return db.hotTopics.where('source').equals(source).reverse().sortBy('timestamp').then((arr) => arr.slice(0, limit));

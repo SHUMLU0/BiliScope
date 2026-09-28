@@ -1,4 +1,16 @@
-import { defineConfig, configDefaults } from 'vitest/config';
+/**
+ * 真实 API smoke test 专用配置（P1-10）。
+ *
+ * 常规 `pnpm test`（vitest.config.ts）已把 tests/smoke/** 排除，CI 因此完全离线、
+ * 结果确定。这个配置只在需要验证「真实 B 站链路还活着」时手动跑：
+ *
+ *   pnpm test:smoke
+ *
+ * 注意：会真实访问 api.bilibili.com，可能因 IP 风控返回 -352 / 412，
+ * 这是 B 站侧的限流，不是测试失败；测试只对「签名/结构性错误」做断言。
+ */
+
+import { defineConfig } from 'vitest/config';
 import { resolve } from 'node:path';
 
 export default defineConfig({
@@ -19,18 +31,8 @@ export default defineConfig({
   },
   test: {
     globals: true,
-    environment: 'jsdom',
-    setupFiles: ['./tests/setup.ts'],
-    include: ['tests/**/*.{test,spec}.{ts,tsx}'],
-    // P1-10：真实网络 smoke test 不在常规测试里跑（否则 CI 每次都打真实 B 站接口）。
-    // 需要时用 `pnpm test:smoke`（见 vitest.smoke.config.ts）。
-    exclude: [...configDefaults.exclude, 'tests/smoke/**'],
-    testTimeout: 15_000,
-    coverage: {
-      provider: 'v8',
-      reporter: ['text', 'html'],
-      include: ['src/**/*.{ts,tsx}'],
-      exclude: ['src/**/*.d.ts', 'src/ui/**/*.tsx'],
-    },
+    environment: 'node',
+    include: ['tests/smoke/**/*.{test,spec}.ts'],
+    testTimeout: 30_000,
   },
 });

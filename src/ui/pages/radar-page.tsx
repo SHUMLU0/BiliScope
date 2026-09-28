@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Nav } from '../components/Nav';
 import { SearchCollector } from '@collectors/search-collector';
-import { formatInt } from '@utils/time';
+import { formatDuration, formatInt } from '@utils/time';
 import type { Video } from '@models/video';
 
 const search = new SearchCollector();
@@ -56,6 +56,7 @@ export function RadarPage() {
               <tr>
                 <th>标题</th>
                 <th>UP</th>
+                <th>播放</th>
                 <th>BV</th>
                 <th>时长</th>
               </tr>
@@ -66,9 +67,14 @@ export function RadarPage() {
                   <td>
                     <a href={`comment.html?bvid=${v.bvid}`}>{v.title}</a>
                   </td>
-                  <td className="faint">{v.creatorId}</td>
+                  {/* V0.1.2（P0-4）：此前整列显示的是字面量 "search" */}
+                  <td className="faint">
+                    {v.authorName ?? (v.authorMid ? `uid:${v.authorMid}` : '—')}
+                  </td>
+                  {/* 缺失即显示 –，不用 0 伪装 */}
+                  <td>{formatInt(v.views)}</td>
                   <td className="mono faint">{v.bvid}</td>
-                  <td>{formatInt(v.duration)}</td>
+                  <td>{formatDuration(v.duration)}</td>
                 </tr>
               ))}
             </tbody>

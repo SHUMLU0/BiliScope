@@ -8,6 +8,7 @@ import { z } from 'zod';
 import { creatorSchema, type Creator } from '@models/creator';
 import { newId } from '@utils/id';
 import { nowIso } from '@utils/time';
+import { biliCode } from '@utils/bili';
 import type { Source } from '@models/common';
 
 interface BiliApiResp {
@@ -108,18 +109,41 @@ export function normalizeCreator(raw: unknown, opts?: { source?: Source; now?: s
   return parsed.data;
 }
 
-/** 单独解析 upstat 响应为 totals */
-export function normalizeCreatorTotals(raw: unknown): {
-  totalViews: number;
-  totalLikes: number;
-  totalArticles: number;
-} {
-  const statParsed = spaceUpstat.safeParse(raw);
-  if (!statParsed.success) return { totalViews: 0, totalLikes: 0, totalArticles: 0 };
+export interface CreatorTotals {
+  /** null = 未采集到（接口被风控 / 不可用），不等于 0 */
+  totalViews: number | null;
+  totalLikes: number | null;
+  totalArticles: number | null;
+  /** 本次是否真的拿到了 upstat 数据 */
+  available: boolean;
+}
+
+const TOTALS_UNAVAILABLE: CreatorTotals = {
+  totalViews: null,
+  totalLikes: null,
+  totalArticles: null,
+  available: false,
+};
+
+/**
+ * 单独解析 upstat 响应为 totals。
+ * V0.1.2（P1-6）：拿不到数据时返回 null + available=false，
+ * 不允许用 0 伪装成「采集到 0 播放」——那会让趋势图和 AI 分析得出错误结论。
+ */
+export function normalizeCreatorTotals(raw: unknown): CreatorTotals {
+  if (raw === null || raw === undefined) return TOTALS_UNAVAILABLE;
+  // HTTP 200 但 code != 0（如 -352 风控）视为不可用
+  const code = biliCode(raw);
+  if (code !== null && code !== 0) return TOTALS_UNAVAILABLE;
+
+  const body = raw as { data?: unknown };
+  const statParsed = spaceUpstat.safeParse(body.data ?? raw);
+  if (!statParsed.success) return TOTALS_UNAVAILABLE;
   const s = statParsed.data;
   return {
     totalViews: (s.archive?.view ?? 0) + (s.article?.view ?? 0),
     totalLikes: s.likes ?? 0,
     totalArticles: 0,
+    available: true,
   };
 }

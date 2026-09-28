@@ -11,6 +11,12 @@ export interface HttpOptions {
   backoffBaseMs?: number;
   headers?: Record<string, string>;
   signal?: AbortSignal;
+  /**
+   * 请求来源页。B 站多数接口（search/type、space 系列）要求来自 bilibili 域，
+   * 否则 412。Referer 属于 fetch 的 forbidden header，只能通过 referrer 选项设置，
+   * 这里透传给 fetch；同时也会写一份 Referer 头（Node / 测试环境可见）。
+   */
+  referrer?: string;
 }
 
 export interface HttpError extends Error {
@@ -63,6 +69,7 @@ export async function httpJson<T = unknown>(
     ...(opts.headers ?? {}),
   };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (opts.referrer && !headers['Referer']) headers['Referer'] = opts.referrer;
 
   let lastErr: HttpError | null = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -83,6 +90,7 @@ export async function httpJson<T = unknown>(
         credentials: 'omit',
         mode: 'cors',
         signal: ctrl.signal,
+        ...(opts.referrer ? { referrer: opts.referrer, referrerPolicy: 'unsafe-url' as const } : {}),
       });
       clearTimeout(t);
 

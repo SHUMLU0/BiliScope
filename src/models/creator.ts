@@ -25,10 +25,11 @@ export const creatorSnapshotSchema = z.object({
   followers: z.number().int().nonnegative(),
   following: z.number().int().nonnegative(),
   videoCount: z.number().int().nonnegative(),
-  totalViews: z.number().int().nonnegative().default(0),
-  totalLikes: z.number().int().nonnegative().default(0),
-  totalComments: z.number().int().nonnegative().default(0),
-  totalFavorites: z.number().int().nonnegative().default(0),
+  // V0.1.2（P1-6）：null = 本次没采集到（upstat 被风控），绝不能写成 0 假装「采集到 0」
+  totalViews: z.number().int().nonnegative().nullable().default(null),
+  totalLikes: z.number().int().nonnegative().nullable().default(null),
+  totalComments: z.number().int().nonnegative().nullable().default(null),
+  totalFavorites: z.number().int().nonnegative().nullable().default(null),
   source: z.enum(['bili-api', 'bili-web', 'manual']),
 });
 

@@ -64,7 +64,20 @@ describe('normalizeSearchVideo', () => {
     expect(v.tags).toEqual(['AI', '工具', '推荐']);
     expect(v.cover).toBe('https://i0.hdslb.com/bfs/archive/abc.jpg');
     expect(v.source).toBe('bili-web');
-    expect(v.creatorId).toBe('search');
+    // V0.1.2（P0-4）：creatorId 不再是字面量 'search'，UP 与播放数据必须保留
+    expect(v.creatorId).toBe('uid:67890');
+    expect(v.authorName).toBe('测试UP');
+    expect(v.authorMid).toBe(67890);
+    expect(v.views).toBe(12345);
+  });
+
+  it('无 mid / 无 play 时不伪造数据（未知留空）', () => {
+    const v = normalizeSearchVideo({ ...raw, mid: undefined, author: undefined, play: undefined });
+    expect(v).not.toBeNull();
+    expect(v?.creatorId).toBe('search');
+    expect(v?.authorName).toBeUndefined();
+    expect(v?.authorMid).toBeUndefined();
+    expect(v?.views).toBeUndefined();
   });
 
   it('falls back to tag_list when tag missing', () => {

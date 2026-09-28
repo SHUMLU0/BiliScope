@@ -7,8 +7,18 @@
 
 import { z } from 'zod';
 import { hotTopicSchema, type HotTopic } from '@models/idea';
-import { newId } from '@utils/id';
+import { md5 } from '@utils/md5';
 import { nowIso } from '@utils/time';
+
+/**
+ * 业务键 id：source + title 决定唯一性。
+ * V0.1.2（P1-9）：此前每次刷新都用 newId('ht')，配合 bulkPut 会不断堆积重复行，
+ * 榜单「刷新一次多一份」完全不可用。改成业务键后写入是「快照语义」：
+ * 同一条热榜重复采集只更新 rank / timestamp，行数保持恒定。
+ */
+export function hotTopicBusinessId(source: string, title: string): string {
+  return `ht_${md5(`${source}|${title}`).slice(0, 16)}`;
+}
 
 const hotRespSchema = z
   .object({
@@ -45,9 +55,10 @@ export function normalizeHotList(raw: unknown, source: HotTopic['source'] = 'bil
   for (let i = 0; i < list.length; i++) {
     const v = list[i];
     if (!v) continue;
+    const title = v.title || `untitled_${i}`;
     const cand = {
-      id: newId('ht'),
-      title: v.title || `untitled_${i}`,
+      id: hotTopicBusinessId(source, title),
+      title,
       source,
       url: v.short_link || v.link || (v.bvid ? `https://www.bilibili.com/video/${v.bvid}` : undefined),
       rank: i + 1,
@@ -95,9 +106,10 @@ export function normalizeHotSearch(raw: unknown): HotTopic[] {
   for (let i = 0; i < list.length; i++) {
     const v = list[i];
     if (!v || !v.keyword) continue;
+    const title = v.show_name || v.keyword;
     const cand = {
-      id: newId('ht'),
-      title: v.show_name || v.keyword,
+      id: hotTopicBusinessId('bili-search', title),
+      title,
       source: 'bili-search' as const,
       url: `https://search.bilibili.com/all?keyword=${encodeURIComponent(v.keyword)}`,
       rank: i + 1,

@@ -158,13 +158,78 @@ describe('CreatorCollector', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.data[0]!.name).toBe('upstat-fail');
-    // totals 全 0
+    // V0.1.2（P1-6）：upstat 拿不到 → totals 必须是 null（未知），不能写成 0
     const sn = await (await import('@repositories/index')).creatorSnapshotRepo.listByCreator(
       r.data[0]!.id,
     );
     expect(sn.length).toBe(1);
-    expect(sn[0]!.totalViews).toBe(0);
-    expect(sn[0]!.totalLikes).toBe(0);
+    expect(sn[0]!.totalViews).toBeNull();
+    expect(sn[0]!.totalLikes).toBeNull();
+  }, 8000);
+
+  // V0.1.2（P0-2）：WBI 接口被风控（HTTP 200 + code=-352）时必须降级到 legacy acc/info
+  it('wbi/acc/info 返回 -352 时降级到 legacy acc/info', async () => {
+    const mockFetch = vi.fn(async (url: string | URL | Request) => {
+      const u = typeof url === 'string' ? url : url.toString();
+      if (u.includes('x/web-interface/nav')) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              wbi_img: {
+                img_url: 'https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png',
+                sub_url: 'https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png',
+              },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (u.includes('wbi/acc/info')) {
+        // 注意：这里 HTTP 是 200，不抛异常 —— 原实现会把它当成功吃掉
+        return new Response(
+          JSON.stringify({ code: -352, message: '风控校验失败', data: null }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (u.includes('/x/space/acc/info')) {
+        return new Response(
+          JSON.stringify({
+            code: 0,
+            data: {
+              mid: 33333,
+              name: 'legacy-fallback',
+              face: '',
+              sign: '',
+              level_info: { current_level: 0 },
+              fans: 3,
+              following: 0,
+              archive_count: 0,
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      if (u.includes('upstat')) {
+        return new Response(
+          JSON.stringify({ code: -352, message: '风控', data: null }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      throw new Error('unmocked: ' + u);
+    }) as unknown as typeof fetch;
+    globalThis.fetch = mockFetch;
+
+    const c = new CreatorCollector();
+    const r = await c.collect({ targetId: '33333' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.data[0]!.name).toBe('legacy-fallback');
+    const urls = (mockFetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) =>
+      String(c[0]),
+    );
+    expect(urls.some((u) => u.includes('wbi/acc/info') && u.includes('w_rid='))).toBe(true);
+    expect(urls.some((u) => u.includes('/x/space/acc/info?mid=33333'))).toBe(true);
   }, 8000);
 
   it('返回的 Creator.id 与 DB 中持久化 id 一致（V0.1.1 temp ID 修复）', async () => {
@@ -200,16 +265,28 @@ describe('CreatorCollector', () => {
     expect(r1.ok).toBe(true);
     if (!r1.ok) return;
     const id1 = r1.data[0]!.id;
+    expect(r1.fetched).toBe(true);
 
-    // 第二次采集同一 uid，id 必须不变
+    // V0.1.2（P1-8）：5 分钟内的第二次调用命中缓存，不应再写 snapshot
     const r2 = await c.collect({ targetId: '22222' });
     expect(r2.ok).toBe(true);
     if (!r2.ok) return;
     expect(r2.data[0]!.id).toBe(id1);
+    expect(r2.fetched).toBe(false);
 
-    // 验证 snapshot 能用这个 id 查到
     const { creatorSnapshotRepo } = await import('@repositories/index');
+    const snapsAfterCacheHit = await creatorSnapshotRepo.listByCreator(id1);
+    expect(snapsAfterCacheHit.length).toBe(1);
+
+    // 清掉缓存后再次采集 = 真的采集了一次，应新增一条快照
+    (await import('@utils/cache')).cacheClear();
+    const r3 = await c.collect({ targetId: '22222' });
+    expect(r3.ok).toBe(true);
+    if (!r3.ok) return;
+    expect(r3.fetched).toBe(true);
+    expect(r3.data[0]!.id).toBe(id1);
+
     const snaps = await creatorSnapshotRepo.listByCreator(id1);
-    expect(snaps.length).toBeGreaterThanOrEqual(2);
+    expect(snaps.length).toBe(2);
   }, 8000);
 });

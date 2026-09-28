@@ -6,6 +6,7 @@
  */
 
 import { httpGet } from '@utils/http';
+import { BILI_REFERRER } from '@utils/bili';
 import { logger } from '@utils/logger';
 import { normalizeHotList, normalizeHotSearch } from '@normalizers/hot-topic';
 import { hotTopicRepo } from '@repositories/index';
@@ -21,19 +22,21 @@ export class HotTopicCollector implements Collector<HotTopic> {
       if (mode === 'search') {
         const res = await httpGet<unknown>('https://api.bilibili.com/x/web-interface/search/square', {
           signal: input.signal,
+          referrer: BILI_REFERRER.search,
         });
         const list = normalizeHotSearch(res);
-        if (list.length) await hotTopicRepo.bulkAdd(list);
+        const upserted = list.length ? await hotTopicRepo.bulkAdd(list) : null;
         logger.info(`HotTopicCollector mode=search collected ${list.length}`);
-        return { ok: true, data: list, fetched: true };
+        return { ok: true, data: list, fetched: true, stats: upserted ?? undefined };
       }
       const res = await httpGet<unknown>('https://api.bilibili.com/x/web-interface/ranking/v2', {
         signal: input.signal,
+        referrer: BILI_REFERRER.www,
       });
       const list = normalizeHotList(res, 'bili-hot');
-      if (list.length) await hotTopicRepo.bulkAdd(list);
+      const upserted = list.length ? await hotTopicRepo.bulkAdd(list) : null;
       logger.info(`HotTopicCollector mode=top collected ${list.length}`);
-      return { ok: true, data: list, fetched: true };
+      return { ok: true, data: list, fetched: true, stats: upserted ?? undefined };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const retryable = /timeout|abort|5[0-9]{2}|network|rate/i.test(msg);

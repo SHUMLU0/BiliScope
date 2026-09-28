@@ -32,6 +32,23 @@ export async function cached<T>(key: string, ttlMs: number, loader: () => Promis
   return v;
 }
 
+/**
+ * 同 cached()，但额外返回是否命中缓存。
+ * V0.1.2（P1-8）：调用方需要区分「本次真的采集了」和「读的是缓存」——
+ * 缓存命中时不应该再往时序库里写一条 snapshot，否则时间序列会被重复点污染。
+ */
+export async function cachedWithMeta<T>(
+  key: string,
+  ttlMs: number,
+  loader: () => Promise<T>,
+): Promise<{ value: T; hit: boolean }> {
+  const hit = cacheGet<T>(key);
+  if (hit !== undefined) return { value: hit, hit: true };
+  const v = await loader();
+  cacheSet(key, v, ttlMs);
+  return { value: v, hit: false };
+}
+
 export function cacheClear(): void {
   store.clear();
 }

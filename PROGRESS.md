@@ -5,6 +5,25 @@
 
 ---
 
+## V0.1.2 修复（独立验收第二轮 · P0 x4 + P1 x6）
+
+| # | 级别 | 阶段 | 状态 | 备注 |
+|---|---|---|---|---|
+| 1 | P0 | 真正实现 MD5 WBI 签名 | ✅ | 新增 `src/utils/md5.ts`（RFC 1321 纯 JS）；`w_rid = MD5(query + mixin_key)`；**顺带修掉 mixin key 只取到 sub_key 的隐藏 bug**；新增 `buildWbiQuery()` 保证签名与请求 URL 编码同源；MD5 由 RFC 向量 + Node crypto 差分双重校验 |
+| 2 | P0 | WBI 接口失败时真正 fallback | ✅ | 风控是 HTTP 200 + `code=-352/403/412` 不抛异常。新增 `src/utils/bili.ts`（`biliCode/isBiliBlocked/hasBiliData`）；Creator 与 Video 两条链路改成「业务码不可用 → 降级 legacy」，不再只在签名抛错时降级 |
+| 3 | P0 | SearchCollector 真实 Chrome 请求链路 | ✅ | 请求带 bilibili 域 `referrer`（http 层新增 `referrer` 透传）；URL 走真实 WBI 签名，签名失败回退未签名，被拦再回退一次 |
+| 4 | P0 | Radar 的 UP / views 不丢 | ✅ | `Video` 新增可选 `authorName/authorMid/views`；`creatorId` 由字面量 `search` 改为 `uid:{mid}`；Radar 新增「播放」列，UP 列显示真实 UP 名，时长改用 `formatDuration` |
+| 5 | P1 | Import 写入前真正 Zod validate | ✅ | `IMPORT_TABLE_SCHEMAS` 12 张表逐条 `safeParse`；非法行跳过 + 计数；preview 上报 `counts/invalid/errors`，apply 返回 `imported/skipped` |
+| 6 | P1 | unknown ≠ 0 | ✅ | `CreatorSnapshot.totalViews/totalLikes/...` 改 `number \| null`；`normalizeCreatorTotals` 返回 `null + available=false`；UI `formatInt` 显示 `–` |
+| 7 | P1 | Comment 新增数用真实计数 | ✅ | `CollectorOk.stats{added,updated,unchanged}`；Comment 页显示「新增 / 已存在 / 抓到」三项，不再用 `data.length` |
+| 8 | P1 | 缓存命中不制造 snapshot | ✅ | 新增 `cachedWithMeta()`；命中时 `fetched=false` 且不写时序快照 |
+| 9 | P1 | HotTopic 按业务键去重 | ✅ | `hotTopicBusinessId(source,title)` = md5 前 16 位；bulkPut 变 upsert；repo 返回真实 `added/updated` |
+| 10 | P1 | Smoke test 从普通 CI 分离 | ✅ | `vitest.config.ts` 排除 `tests/smoke/**`；新增 `vitest.smoke.config.ts` + `pnpm test:smoke`；CI 默认离线 + `scripts/assert-smoke-isolated.mjs` 守卫；smoke 改 `workflow_dispatch` 手动触发 |
+| — | — | 门禁全绿 | ✅ | 135/135 tests · typecheck 0 · lint 0 · build OK · 0 secrets · TEST 001-009 PASSED |
+| — | — | commit + push + CI | ⏸ | 待执行 |
+
+---
+
 ## V0.1.1 修复（独立验收反馈 · 真实数据链路问题）
 
 | 阶段 | 状态 | 备注 |
@@ -77,7 +96,23 @@
 
 ---
 
-## 下一阶段（不在 V0.1 / V0.1.1 范围）
+## V0.1.2 门禁
 
-- V0.2：WBI 真实 MD5 签名 + 50w+ Creator Index + 实验闭环
+| 命令 | 结果 |
+|---|---|
+| `pnpm typecheck` | ✅ EXIT=0 |
+| `pnpm lint` | ✅ EXIT=0 |
+| `pnpm test` | ✅ **135/135 PASS**（21 files，离线、不含 smoke） |
+| `pnpm test:smoke` | ✅ 4/4 PASS（真实网络，手动执行） |
+| `pnpm build` | ✅ EXIT=0 |
+| `pnpm scan-secrets` | ✅ 0 leaks |
+| `node scripts/assert-smoke-isolated.mjs` | ✅ OK |
+| `pnpm verify-acceptance` | ✅ TEST 001-009 PASSED |
+
+---
+
+## 下一阶段（不在 V0.1 / V0.1.1 / V0.1.2 范围）
+
+- V0.2：50w+ Creator Index + 实验闭环 + 榜单时序（快照语义）索引
+- WBI 端到端成功仍需有 Cookie / 低风控出口的环境复验（见 `FINAL_AUDIT.md` § 10 已知限制）
 - 详见 `FINAL_AUDIT.md` § 8 § 9

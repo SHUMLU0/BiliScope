@@ -16,14 +16,15 @@ import { nowIso } from '@utils/time';
 import { normalizeVideoList, normalizeVideoStat } from '@normalizers/video';
 import { creatorRepo, videoRepo, videoSnapshotRepo } from '@repositories/index';
 import { videoSnapshotSchema, type Video, type VideoSnapshot } from '@models/video';
-import { refreshWbi, signWbi } from '@utils/wbi';
+import { BILI_REFERRER, biliCode, isBiliBlocked } from '@utils/bili';
+import { buildWbiQuery, refreshWbi } from '@utils/wbi';
 import type { Collector, CollectorInput, CollectorResult } from './types';
 
 /** 构造带 WBI 签名的 arc/search URL；失败返回 null（调用方降级） */
 async function buildWbiArcSearchUrl(uid: number, pn: number, ps: number): Promise<string | null> {
   try {
     await refreshWbi();
-    const signed = await signWbi({
+    const query = await buildWbiQuery({
       mid: uid,
       pn,
       ps,
@@ -33,12 +34,47 @@ async function buildWbiArcSearchUrl(uid: number, pn: number, ps: number): Promis
       tid: 0,
       keyword: '',
     });
-    const qs = new URLSearchParams(signed).toString();
-    return `https://api.bilibili.com/x/space/wbi/arc/search?${qs}`;
+    return `https://api.bilibili.com/x/space/wbi/arc/search?${query}`;
   } catch (e) {
     logger.warn(`WBI arc/search sign failed: ${e instanceof Error ? e.message : e}`);
     return null;
   }
+}
+
+function legacyArcSearchUrl(uid: number, pn: number, ps: number): string {
+  const q = encodeQuery({ mid: uid, pn, ps, order: 'pubdate', platform: 'web', web_location: 40020 });
+  return `https://api.bilibili.com/x/space/arc/search?${q}`;
+}
+
+function encodeQuery(params: Record<string, string | number>): string {
+  return Object.entries(params)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join('&');
+}
+
+/**
+ * 拉一页投稿列表。
+ * V0.1.2（P0-2）：WBI 响应 HTTP 200 但 code=-352/403 时也要降级到 legacy arc/search，
+ * 而不是只在签名抛错时降级（原实现在真实环境下几乎不会触发降级）。
+ */
+async function fetchArcSearchPage(
+  uid: number,
+  pn: number,
+  ps: number,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const referrer = BILI_REFERRER.space(uid);
+  const wbiUrl = await buildWbiArcSearchUrl(uid, pn, ps);
+  if (wbiUrl) {
+    try {
+      const res = await httpGet<unknown>(wbiUrl, { signal, referrer });
+      if (!isBiliBlocked(res)) return res;
+      logger.warn(`wbi/arc/search 被拦（code=${biliCode(res)}），降级 legacy arc/search`);
+    } catch (e) {
+      logger.warn(`wbi/arc/search 请求失败，降级 legacy: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  return httpGet<unknown>(legacyArcSearchUrl(uid, pn, ps), { signal, referrer });
 }
 
 export class VideoCollector implements Collector<Video> {
@@ -62,18 +98,19 @@ export class VideoCollector implements Collector<Video> {
       let pn = 1;
       const ps = 30;
       // 阶段化：最多 200 条 / UP 主
+      let added = 0;
+      let updated = 0;
+      let unchanged = 0;
       while (pn <= 7) {
-        const wbiUrl = await buildWbiArcSearchUrl(uid, pn, ps);
-        const url =
-          wbiUrl ??
-          // 降级：带 wts 但无 w_rid，B 站通常会返回 -352；保留以暴露明确错误
-          `https://api.bilibili.com/x/space/wbi/arc/search?mid=${uid}&pn=${pn}&ps=${ps}&order=pubdate&platform=web&web_location=40020`;
-        const res = await httpGet<unknown>(url, { signal });
+        const res = await fetchArcSearchPage(uid, pn, ps, signal);
         const videos = normalizeVideoList(res, { creatorId: creator.id });
         if (!videos.length) break;
         for (const v of videos) {
           const upserted = await videoRepo.upsertByBvid(v);
           const actualVideoId = upserted.ids[0] ?? v.id;
+          added += upserted.added;
+          updated += upserted.updated;
+          unchanged += upserted.unchanged;
           if (upserted.added || upserted.updated) {
             out.push({ ...v, id: actualVideoId });
           }
@@ -81,7 +118,7 @@ export class VideoCollector implements Collector<Video> {
           try {
             const stat = await httpGet<unknown>(
               `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(v.bvid)}`,
-              { signal },
+              { signal, referrer: BILI_REFERRER.video(v.bvid) },
             );
             const norm = normalizeVideoStat(stat);
             if (norm) {
@@ -108,8 +145,8 @@ export class VideoCollector implements Collector<Video> {
         if (videos.length < ps) break;
         pn++;
       }
-      logger.info(`VideoCollector uid=${uid} collected ${out.length}`);
-      return { ok: true, data: out, fetched: true };
+      logger.info(`VideoCollector uid=${uid} collected ${out.length} (added=${added} updated=${updated} unchanged=${unchanged})`);
+      return { ok: true, data: out, fetched: true, stats: { added, updated, unchanged } };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const retryable = /timeout|abort|5[0-9]{2}|network|rate/i.test(msg);
@@ -121,7 +158,7 @@ export class VideoCollector implements Collector<Video> {
     try {
       const res = await httpGet<unknown>(
         `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`,
-        { signal },
+        { signal, referrer: BILI_REFERRER.video(bvid) },
       );
       const norm = normalizeVideoStat(res);
       if (!norm) return { ok: false, error: 'stat parse failed', retryable: false };
