@@ -63,6 +63,24 @@ describe('prompts', () => {
     expect(user).toContain('foo');
   });
 
+  // V0.1.1 修复（独立验收反馈 · 字段错误）：
+  // 原 buildCreatorAnalyzePrompt 误把 v.duration 当成 views 喂给 AI。
+  // 修复后 recentVideos 段只写 duration；views 数据由 snapshots 段承担。
+  it('buildCreatorAnalyzePrompt: recentVideos uses correct duration field, not views', () => {
+    const { user } = buildCreatorAnalyzePrompt({ creator, recentVideos: [video], recentSnapshots: [] });
+    const parsed = JSON.parse(user) as {
+      recentVideos: Array<Record<string, unknown>>;
+      snapshots: unknown[];
+    };
+    expect(parsed.recentVideos).toHaveLength(1);
+    const v = parsed.recentVideos[0]!;
+    // 真实字段 = duration，不再误传 views（views 来自 snapshots）
+    expect(v).toHaveProperty('duration', video.duration);
+    expect(v).not.toHaveProperty('views');
+    // 模板里也不应有 "views: v.duration" 这类误导性片段
+    expect(user).not.toMatch(/"views":\s*\d+/);
+  });
+
   it('buildVideoAnalyzePrompt excludes prediction language', () => {
     const { system } = buildVideoAnalyzePrompt({ video, comments: [] });
     expect(system).not.toMatch(/爆款概率/);

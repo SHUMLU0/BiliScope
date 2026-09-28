@@ -43,7 +43,9 @@ export function buildCreatorAnalyzePrompt(ctx: CreatorAnalyzeCtx): { system: str
       recentVideos: ctx.recentVideos.slice(0, 20).map((v) => ({
         title: v.title,
         pubTime: v.pubTime,
-        views: v.duration, // 注意此处只携带基础数据，播放数据来自 snapshots
+        // V0.1.1 修复：原代码误把 duration 当成 views，这里改为真实字段 duration。
+        // Video 模型本身不存播放数据（views 来自 VideoSnapshot，由 snapshots 段提供）。
+        duration: v.duration,
         tags: v.tags,
       })),
       snapshots: ctx.recentSnapshots.slice(-30).map((s) => ({

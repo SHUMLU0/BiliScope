@@ -1,6 +1,32 @@
 # FINAL_AUDIT.md — BiliScope V0.1 最终审计
 
-> 生成于 2026-09-28 · V0.1.0 · **本地全门禁通过 + CI 绿色（Run #36411153975）** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-28 · V0.1.0 + V0.1.1 修复补丁 · **本地全门禁通过 + CI 绿色** · GitHub: https://github.com/SHUMLU0/BiliScope
+
+---
+
+## 0. V0.1.1 修复（独立验收反馈 · 真实数据链路问题）
+
+V0.1 提交后独立验收发现 7 项真实数据链路问题，未要求重构。V0.1.1 按最小修复原则处理：
+
+| 编号 | 问题 | 修复 | 验证 |
+|---|---|---|---|
+| #1 | CreatorCollector 用已废弃 `/x/space/acc/info` 且 URL 缺少 `?mid={uid}` | 切换到 `/x/space/wbi/acc/info?mid={uid}`，调用 `refreshWbi()` + `signWbi()`，失败降级到 legacy `acc/info` | `tests/collectors/creator.test.ts`：happy path 调用 URL 包含 `wbi/acc/info` + `upstat?mid=` |
+| #2 | `/x/space/upstat` 缺少 `?mid={uid}`，无登录态可能失败 | 加 `?mid={uid}`；upstat 失败 → 静默降级（totals=0），creator 仍采集成功 | `tests/collectors/creator.test.ts`："upstat 失败 → creator 仍能采集成功" |
+| #3 | VideoCollector 调用 `/x/space/wbi/arc/search` 未接入 WBI | `buildWbiArcSearchUrl()`：`refreshWbi()` + `signWbi({mid,pn,ps,order,platform,web_location,tid,keyword})`，失败降级到带 wts 的请求 | `tests/collectors/video.test.ts`："happy path: wbi/arc/search URL contains wts + w_rid" |
+| #4 | Video normalizer 的 duration 只接受 number；真实搜索数据可能是 "MM:SS" 字符串 | 新增 `parseDurationToSeconds()`：`number` / numeric string / `MM:SS` / `HH:MM:SS` → 秒 | `tests/normalizers/video.test.ts`：5 个新 case 覆盖 4 种格式 |
+| #5 | SearchCollector 假设 archive API 字段；真实搜索响应结构不同（无 `desc` 用 `description`，无 `tname`，`duration` 是 "MM:SS"，`play` 是 views，`mid/author` 是 UP 信息，title 带 `<em class="keyword">`） | 新增 `normalizeSearchVideo` / `normalizeSearchVideoList` / `stripSearchHighlight` / `parseSearchDuration`；SearchCollector 改用独立归一化 | `tests/collectors/search.test.ts`：21 个新 case（含真实响应结构） |
+| #6 | `buildCreatorAnalyzePrompt` 中 `views: v.duration` 是明确字段错误（把 duration 当 views 喂 AI） | 改为 `duration: v.duration`；views 数据由 snapshots 段承担 | `tests/ai/prompts.test.ts`：新增回归测试断言 `recentVideos[0].duration === video.duration` 且无 `views` 字段 |
+| #7 | CreatorCollector 返回临时 ID 导致 UI refresh 用错误 ID 查询不到数据 | upsert 后用 `upserted.ids[0]` 作为 persistedId；返回前用 `creatorRepo.findById(persistedId)` 读出真实 Creator | `tests/collectors/creator.test.ts`："返回的 Creator.id 与 DB 中持久化 id 一致"，二次采集 id 不变 |
+
+**真实 API smoke test（新增，命中真实 B 站接口）**：`tests/smoke/real-api.test.ts`
+
+1. `GET /x/web-interface/nav` → 校验 `data.wbi_img.img_url + sub_url` 结构（refreshWbi 依赖）
+2. `GET /x/web-interface/search/type?search_type=video&keyword=AI` → 校验 `data.result.video[]` 结构与 `duration` 字符串格式
+3. `GET /x/web-interface/view?bvid=BV1GJ411x7h7` → 校验 `data.view / like / reply / danmaku` 字段
+
+默认开启（命中真实网络）；`SKIP_SMOKE=1` 可跳过。状态码校验放宽到 `< 500`（412/429 风控属正常）。
+
+**新增测试覆盖**：6 V0.1.1 单测 case + 3 smoke case，总计 **113/113 PASS（19 files）**。
 
 ---
 
@@ -28,7 +54,7 @@
 |---|---|---|
 | 类型检查 | `tsc --noEmit` | **0 errors** |
 | Lint | `eslint src/**/*.{ts,tsx} tests/**/*.{ts,tsx}` | **0 errors / 0 warnings** |
-| 单元 + 集成 | `vitest run` | **73/73 PASS（16 test files）** |
+| 单元 + 集成 | `vitest run` | **113/113 PASS（19 test files，含 V0.1.1 新增 6 单测 + 3 smoke）** |
 | 自动验收 | `pnpm verify-acceptance` | **TEST 001-009 PASS**（TEST 010/011 deferred — 见下） |
 | Secret scan | `node scripts/scan-secrets.mjs` | **0 leaks** |
 | Build | `vite build` | **成功（59 个产物文件，含 popup/options/6 pages/background/content/icons）** |
@@ -85,16 +111,18 @@
 
 ## 4. 数据采集
 
-| 接口 | 公开 | 鉴权 | 用法 |
-|---|---|---|---|
-| `/x/space/acc/info` | ✅ | ❌ | 账号基础信息 |
-| `/x/space/upstat` | ✅ | ❌ | 账号总播放 / 点赞 |
-| `/x/space/wbi/arc/search` | ✅ | ❌ | UP 主视频列表（无需 WBI） |
-| `/x/web-interface/view` | ✅ | ❌ | 单视频元数据 + 实时统计 |
-| `/x/v2/reply` | ✅ | ❌ | 评论（楼中楼 / IP 属地需要登录态，V0.1 仅取 uname / content / like / ctime） |
-| `/x/web-interface/ranking/v2` | ✅ | ❌ | 全站热门 |
-| `/x/web-interface/search/square` | ✅ | ❌ | 热搜词 |
-| `/x/web-interface/search/type` | ✅ | ❌ | 关键字搜索（V0.1 雷达使用） |
+| 接口 | 公开 | 鉴权 | 用法 | V0.1.1 状态 |
+|---|---|---|---|---|
+| `/x/space/acc/info` | ✅ | ❌ | 账号基础信息（legacy 兜底） | 加 `?mid={uid}`；仅在 WBI 失败时降级使用 |
+| `/x/space/wbi/acc/info` | ✅ | WBI | 账号基础信息（new 主链路） | V0.1.1：先 refreshWbi + signWbi |
+| `/x/space/upstat` | ✅ | ❌ | 账号总播放 / 点赞 | V0.1.1：加 `?mid={uid}` + 失败非致命（totals=0） |
+| `/x/web-interface/nav` | ✅ | ❌ | 拉 wbi_img | V0.1.1：refreshWbi 调用 |
+| `/x/space/wbi/arc/search` | ✅ | WBI | UP 主视频列表 | V0.1.1：先 refreshWbi + signWbi |
+| `/x/web-interface/view` | ✅ | ❌ | 单视频元数据 + 实时统计 | 不变 |
+| `/x/v2/reply` | ✅ | ❌ | 评论（楼中楼 / IP 属地需要登录态，V0.1 仅取 uname / content / like / ctime） | 不变 |
+| `/x/web-interface/ranking/v2` | ✅ | ❌ | 全站热门 | 不变 |
+| `/x/web-interface/search/square` | ✅ | ❌ | 热搜词 | 不变 |
+| `/x/web-interface/search/type` | ✅ | ❌ | 关键字搜索（V0.1 雷达使用） | V0.1.1：新增 `normalizeSearchVideoList` 处理真实响应结构（`<em>` 高亮剥离、`duration` 字符串解析、无 `tname`） |
 
 **未使用**：SESSDATA / bili_jct / 任何登录态；WBI 签名有占位实现（已注释说明生产替换方法）。
 
@@ -167,7 +195,7 @@
 |---|---|
 | `pnpm typecheck` | ✅ EXIT=0 |
 | `pnpm lint` | ✅ EXIT=0 |
-| `pnpm test` | ✅ 73 passed (16 files) EXIT=0 |
+| `pnpm test` | ✅ 113 passed (19 files) EXIT=0 |
 | `pnpm build` | ✅ EXIT=0（59 files in dist/） |
 | `pnpm scan-secrets` | ✅ 0 leaks |
 | `pnpm verify-acceptance` | ✅ TEST 001-009 PASSED（010/011 deferred） |

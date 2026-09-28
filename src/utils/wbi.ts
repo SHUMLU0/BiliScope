@@ -76,6 +76,12 @@ export function loadCachedMixinKey(): string | null {
   return cachedMixinKey;
 }
 
+/** 仅测试用：清空 WBI 缓存 */
+export function __resetWbiForTest(): void {
+  cachedMixinKey = null;
+  cachedNavInfoAt = 0;
+}
+
 /**
  * 对参数做 WBI 签名并返回新对象（不修改入参）。
  * 注意：本函数当前实现为降级版（SHA256 截断），**不要在生产环境依赖**，

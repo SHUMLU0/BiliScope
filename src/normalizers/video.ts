@@ -2,6 +2,10 @@
  * Video normalizer.
  * - listVideos 返回结构里 `vlist` 数组（archive API） 或 `data.list.vlist`
  * - 单视频详情需要 stat 接口合并数据
+ *
+ * V0.1.1 修复：
+ *   - `duration` 字段在 archive API 是 number（秒），在搜索接口是 string（"MM:SS" / "HH:MM:SS"）。
+ *     rawVideoSchema 用 z.union 兼容，并在 normalizeVideoList 里 coerce 到 number。
  */
 
 import { z } from 'zod';
@@ -9,6 +13,25 @@ import { videoSchema, type Video } from '@models/video';
 import { newId } from '@utils/id';
 import { nowIso, secondsToIso } from '@utils/time';
 import type { Source } from '@models/common';
+
+/** 兼容多种 duration 表示：number、numeric string、"MM:SS"、"HH:MM:SS" */
+export function parseDurationToSeconds(raw: unknown): number {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.max(0, Math.floor(raw));
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s) return 0;
+    if (/^\d+(\.\d+)?$/.test(s)) return Math.max(0, Math.floor(Number(s)));
+    if (s.includes(':')) {
+      const parts = s.split(':').map((p) => Number(p.trim()));
+      if (parts.every((p) => Number.isFinite(p) && p >= 0)) {
+        let total = 0;
+        for (const p of parts) total = total * 60 + p;
+        return Math.max(0, Math.floor(total));
+      }
+    }
+  }
+  return 0;
+}
 
 const rawVideoSchema = z
   .object({
@@ -18,9 +41,14 @@ const rawVideoSchema = z
     desc: z.string().default(''),
     pic: z.string().default(''),
     pubdate: z.number().int().nonnegative().default(0),
-    duration: z.number().int().nonnegative().default(0),
+    // 兼容 number | numeric string | "MM:SS"；最终在 normalizeVideoList 里 coerce
+    duration: z
+      .union([z.number(), z.string()])
+      .transform(() => 0) // 占位，真实值在 normalizeVideoList 通过 parseDurationToSeconds 设置
+      .optional(),
     tname: z.string().default(''),
     tag: z.string().default(''),
+    // 搜索接口可能没有 tname，但有 tag_list；非破坏性 passthrough
   })
   .passthrough();
 
@@ -63,6 +91,8 @@ export function normalizeVideoList(
           .filter(Boolean)
       : [];
     const cover = isValidUrl(v.pic) ? v.pic : undefined;
+    // V0.1.1：兼容 number/string duration
+    const durationSec = parseDurationToSeconds((item as { duration?: unknown }).duration ?? v.duration);
     const candidate = {
       id: newId('vd'),
       bvid: v.bvid,
@@ -72,7 +102,7 @@ export function normalizeVideoList(
       description: v.desc,
       cover,
       pubTime: secondsToIso(v.pubdate || Math.floor(Date.now() / 1000)),
-      duration: v.duration,
+      duration: durationSec,
       category: v.tname,
       tags,
       url: `https://www.bilibili.com/video/${v.bvid}`,

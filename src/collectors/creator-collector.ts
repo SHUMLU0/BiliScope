@@ -1,9 +1,16 @@
 /**
  * CreatorCollector
  * 公开接口：
- *   GET https://api.bilibili.com/x/space/acc/info?mid={uid}
- *   GET https://api.bilibili.com/x/space/upstat?mid={uid}
- *   GET https://api.bilibili.com/x/relation/stat?mid={uid}    （兜底）
+ *   GET https://api.bilibili.com/x/space/acc/info?mid={uid}              （legacy, deprecated by B 站）
+ *   GET https://api.bilibili.com/x/space/wbi/acc/info?mid={uid}          （new, requires WBI signing）
+ *   GET https://api.bilibili.com/x/space/upstat?mid={uid}                （totals，登录态下更稳定）
+ *
+ * V0.1.1 修复（独立验收反馈）：
+ *   - acc/info URL 缺少 ?mid={uid} → 已补全
+ *   - acc/info 已被 B 站弃用 → 切到 wbi/acc/info；WBI 失败时降级到 legacy 接口
+ *   - upstat URL 缺少 ?mid={uid} → 已补全
+ *   - upstat 在无登录态下可能失败 → 改为非致命，totals 退化为 0
+ *   - collect 返回的 Creator 使用 upsert 后的真实 DB id（避免 UI 用临时 id 查不到）
  */
 
 import { httpGet } from '@utils/http';
@@ -14,10 +21,12 @@ import { newId } from '@utils/id';
 import { normalizeCreatorTotals } from '@normalizers/creator';
 import { creatorRepo, creatorSnapshotRepo } from '@repositories/index';
 import { creatorSchema, type Creator, type CreatorSnapshot } from '@models/creator';
+import { refreshWbi, signWbi } from '@utils/wbi';
 import type { Collector, CollectorInput, CollectorResult } from './types';
 
 interface BiliAccountInfo {
   code?: number;
+  message?: string;
   data?: {
     mid?: number;
     name?: string;
@@ -34,6 +43,19 @@ interface CreatorWithTotals extends Creator {
   _totals: ReturnType<typeof normalizeCreatorTotals>;
 }
 
+/** 构造带 WBI 签名的 wbi/acc/info URL；失败返回 null（调用方降级到 legacy 接口） */
+async function buildWbiAccInfoUrl(uid: number): Promise<string | null> {
+  try {
+    await refreshWbi();
+    const signed = await signWbi({ mid: uid, token: '' });
+    const qs = new URLSearchParams(signed).toString();
+    return `https://api.bilibili.com/x/space/wbi/acc/info?${qs}`;
+  } catch (e) {
+    logger.warn(`WBI refresh/sign failed, fallback to legacy acc/info: ${e instanceof Error ? e.message : e}`);
+    return null;
+  }
+}
+
 export class CreatorCollector implements Collector<Creator> {
   readonly name = 'creator';
 
@@ -46,16 +68,23 @@ export class CreatorCollector implements Collector<Creator> {
     const cacheKey = `creator:${uid}`;
     try {
       const fetched = await cached<CreatorWithTotals>(cacheKey, 5 * 60_000, async () => {
-        const acc = await httpGet<BiliAccountInfo>('https://api.bilibili.com/x/space/acc/info', {
-          signal: input.signal,
-        });
+        const wbiUrl = await buildWbiAccInfoUrl(uid);
+        const acc = await httpGet<BiliAccountInfo>(
+          wbiUrl ?? `https://api.bilibili.com/x/space/acc/info?mid=${uid}`,
+          { signal: input.signal },
+        );
         const d = acc.data;
         if (!d || typeof d !== 'object' || !d.mid) {
-          throw new Error(`acc/info returned invalid data`);
+          throw new Error(`acc/info returned invalid data (code=${acc.code ?? 'n/a'} msg=${acc.message ?? 'n/a'})`);
         }
-        const stat = await httpGet<unknown>('https://api.bilibili.com/x/space/upstat', {
-          signal: input.signal,
-        }).catch(() => null);
+        // upstat 在无登录态下可能失败（-352 / 403），不应中断整个 creator 采集
+        const stat = await httpGet<unknown>(
+          `https://api.bilibili.com/x/space/upstat?mid=${uid}`,
+          { signal: input.signal },
+        ).catch((e: unknown) => {
+          logger.warn(`upstat unavailable for uid=${uid}: ${e instanceof Error ? e.message : String(e)}`);
+          return null;
+        });
         const totals = normalizeCreatorTotals(stat);
         const now = nowIso();
         const candidate = {
@@ -85,10 +114,11 @@ export class CreatorCollector implements Collector<Creator> {
       const now = nowIso();
       const upserted = await creatorRepo.upsertByUid(fetched);
       const totals = fetched._totals;
+      const persistedId = upserted.ids[0] ?? fetched.id;
 
       const snap: CreatorSnapshot = {
         id: newId('cs'),
-        creatorId: upserted.ids[0] ?? fetched.id,
+        creatorId: persistedId,
         timestamp: now,
         followers: fetched.followers,
         following: fetched.following,
@@ -100,10 +130,13 @@ export class CreatorCollector implements Collector<Creator> {
         source: 'bili-api',
       };
       await creatorSnapshotRepo.add(snap);
+
+      // 用持久化 id 重新读取 creator，避免 UI 拿到临时 id
+      const persisted = (await creatorRepo.findById(persistedId)) ?? { ...fetched, id: persistedId };
       logger.info(
-        `CreatorCollector uid=${uid} upsert=${JSON.stringify(upserted)} snapCreatorId=${snap.creatorId} snapId=${snap.id}`,
+        `CreatorCollector uid=${uid} upsert=${JSON.stringify(upserted)} snapCreatorId=${persistedId} snapId=${snap.id}`,
       );
-      return { ok: true, data: [fetched], fetched: true };
+      return { ok: true, data: [persisted], fetched: true };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       logger.error(`CreatorCollector uid=${uid} failed: ${msg}`);
