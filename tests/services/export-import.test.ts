@@ -78,12 +78,53 @@ describe('export / import', () => {
     expect(preview.invalid.creators).toBe(1);
     expect(preview.errors.length).toBeGreaterThan(0);
 
-    const res = await applyImport(payload, 'replace');
+    // merge 模式：合法行写入，非法行跳过
+    const res = await applyImport(payload, 'merge');
     expect(res.imported.creators).toBe(1);
     expect(res.skipped.creators).toBe(1);
     const rows = await db.creators.toArray();
     expect(rows.length).toBe(1);
     expect(rows[0]!.uid).toBe(1001);
+
+    // V0.1.3（P1-原子性）：replace 模式只要有一条非法就整体拒绝，
+    // 绝不能"先清空再发现数据坏了"—— 这里必须验证旧数据仍在。
+    const before = await db.creators.count();
+    expect(before).toBe(1);
+    const rejected = await applyImport(payload, 'replace');
+    expect(rejected.imported.creators).toBeUndefined();
+    expect(rejected.errors.join('\n')).toMatch(/整体拒绝/);
+    expect(await db.creators.count()).toBe(1);
+  });
+
+  it('replace 模式：全部合法 → 单事务 clear + bulkPut', async () => {
+    await db.creators.clear();
+    const mk = (uid: number) => ({
+      id: newId('cr'),
+      uid,
+      name: `u${uid}`,
+      sign: '',
+      spaceUrl: `https://space.bilibili.com/${uid}/`,
+      lastCollectedAt: nowIso(),
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      source: 'manual' as const,
+      // V0.1.3：计数器可空 —— 缺失/风控时必须为 null，绝不能写 0
+      level: null,
+      followers: null,
+      following: null,
+      videoCount: null,
+    });
+    await db.creators.add(mk(7001));
+    const payload = {
+      exportedAt: nowIso(),
+      version: '0.1.2',
+      data: { creators: [mk(8001), mk(8002)] },
+    };
+    const res = await applyImport(payload, 'replace');
+    expect(res.imported.creators).toBe(2);
+    const after = await db.creators.toArray();
+    expect(after).toHaveLength(2);
+    expect(after.map((c) => c.uid).sort()).toEqual([8001, 8002]);
   });
 
   it('applyImport 绕过 preview 也照样校验（不信任传入 payload）', async () => {

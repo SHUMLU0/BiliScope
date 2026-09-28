@@ -14,8 +14,9 @@ export function secondsToIso(sec: number): string {
 }
 
 /** 人类可读时长：带 0 填充，定长便于对齐 */
-export function formatDuration(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) return '0s';
+export function formatDuration(sec: number | null | undefined): string {
+  // V0.1.3：未知时长显示 –，不再显示 0s（那会被误读成「真实时长是 0」）
+  if (sec === null || sec === undefined || !Number.isFinite(sec) || sec < 0) return '–';
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
   const m = Math.floor((sec % 3600) / 60);

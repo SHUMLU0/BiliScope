@@ -122,26 +122,34 @@ export async function previewImport(json: string): Promise<ImportPreview> {
   }
 }
 
+/** replace 模式需要清空的所有表（与导出表一一对应） */
+const ALL_TABLES = [
+  db.creators,
+  db.creatorSnapshots,
+  db.videos,
+  db.videoSnapshots,
+  db.comments,
+  db.commentAnalyses,
+  db.hotTopics,
+  db.ideas,
+  db.topics,
+  db.experiments,
+  db.collectionTasks,
+  db.aiAnalyses,
+] as const;
+
 export async function applyImport(p: ExportPayload, mode: ImportMode): Promise<ImportApplyResult> {
-  if (mode === 'replace') {
-    await Promise.all([
-      db.creators.clear(),
-      db.creatorSnapshots.clear(),
-      db.videos.clear(),
-      db.videoSnapshots.clear(),
-      db.comments.clear(),
-      db.commentAnalyses.clear(),
-      db.hotTopics.clear(),
-      db.ideas.clear(),
-      db.topics.clear(),
-      db.experiments.clear(),
-      db.collectionTasks.clear(),
-      db.aiAnalyses.clear(),
-    ]);
+  // V0.1.3（P1-原子性）：顺序固定为
+  //   parse → 全量校验 → 有非法数据则整体拒绝 → （replace）单事务 clear + bulkPut
+  // 绝不能「先 clear 再校验」—— 否则用户导入坏文件会先把旧数据清空。
+  const { tables, invalid, errors } = validatePayload(p);
+  const totalInvalid = Object.values(invalid).reduce((a, b) => a + b, 0);
+  if (mode === 'replace' && totalInvalid > 0) {
+    const msg = `replace 模式整体拒绝：${totalInvalid} 条数据未通过校验，现有数据未做任何改动`;
+    logger.warn(`import rejected mode=replace invalid=${totalInvalid}`);
+    return { imported: {}, skipped: invalid, errors: [...errors, msg] };
   }
 
-  // 写入前重新校验（payload 可能来自 UI 直接传入，不保证走过 previewImport）
-  const { tables, invalid, errors } = validatePayload(p);
   const imported: Record<string, number> = {};
 
   const put = async (name: string, table: { bulkPut: (rows: never[]) => Promise<unknown> }): Promise<void> => {
@@ -151,18 +159,30 @@ export async function applyImport(p: ExportPayload, mode: ImportMode): Promise<I
     imported[name] = rows.length;
   };
 
-  await put('creators', db.creators);
-  await put('creatorSnapshots', db.creatorSnapshots);
-  await put('videos', db.videos);
-  await put('videoSnapshots', db.videoSnapshots);
-  await put('comments', db.comments);
-  await put('commentAnalyses', db.commentAnalyses);
-  await put('hotTopics', db.hotTopics);
-  await put('ideas', db.ideas);
-  await put('topics', db.topics);
-  await put('experiments', db.experiments);
-  await put('collectionTasks', db.collectionTasks);
-  await put('aiAnalyses', db.aiAnalyses);
+  const writeAll = async (): Promise<void> => {
+    await put('creators', db.creators);
+    await put('creatorSnapshots', db.creatorSnapshots);
+    await put('videos', db.videos);
+    await put('videoSnapshots', db.videoSnapshots);
+    await put('comments', db.comments);
+    await put('commentAnalyses', db.commentAnalyses);
+    await put('hotTopics', db.hotTopics);
+    await put('ideas', db.ideas);
+    await put('topics', db.topics);
+    await put('experiments', db.experiments);
+    await put('collectionTasks', db.collectionTasks);
+    await put('aiAnalyses', db.aiAnalyses);
+  };
+
+  if (mode === 'replace') {
+    // 清空 + 写入放在同一个 Dexie 事务里：中途失败会整体回滚，不会留下"半删"状态
+    await db.transaction('rw', ALL_TABLES as unknown as Parameters<typeof db.transaction>[1], async () => {
+      await Promise.all(ALL_TABLES.map((t) => t.clear()));
+      await writeAll();
+    });
+  } else {
+    await writeAll();
+  }
 
   logger.info(`import applied mode=${mode} imported=${JSON.stringify(imported)} skipped=${JSON.stringify(invalid)}`);
   return { imported, skipped: invalid, errors };

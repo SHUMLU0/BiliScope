@@ -14,12 +14,19 @@ import { newId } from '@utils/id';
 import { nowIso, secondsToIso } from '@utils/time';
 import type { Source } from '@models/common';
 
-/** 兼容多种 duration 表示：number、numeric string、"MM:SS"、"HH:MM:SS" */
-export function parseDurationToSeconds(raw: unknown): number {
-  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.max(0, Math.floor(raw));
+/**
+ * 兼容多种 duration 表示：number、numeric string、"MM:SS"、"HH:MM:SS"。
+ *
+ * V0.1.3（P0-3）：返回 `number | null`。
+ *   真实投稿列表用的是 `length`（"12:34"），旧实现只读 `duration`，
+ *   缺失时返回 0 —— 于是页面上「全部 0s」看起来像真实数据。
+ *   现在：解析不出来一律 null（未知），只有真实 0 才返回 0。
+ */
+export function parseDurationToSeconds(raw: unknown): number | null {
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return Math.floor(raw);
   if (typeof raw === 'string') {
     const s = raw.trim();
-    if (!s) return 0;
+    if (!s) return null;
     if (/^\d+(\.\d+)?$/.test(s)) return Math.max(0, Math.floor(Number(s)));
     if (s.includes(':')) {
       const parts = s.split(':').map((p) => Number(p.trim()));
@@ -30,7 +37,46 @@ export function parseDurationToSeconds(raw: unknown): number {
       }
     }
   }
-  return 0;
+  return null;
+}
+
+/**
+ * 发布时间：投稿列表用 `created`，详情/搜索用 `pubdate`。
+ * 返回 null 表示未知 —— 不允许退回 Date.now()（那会让所有视频显示成"今天"）。
+ */
+export function parsePubTimeToIso(raw: Record<string, unknown>): string | null {
+  const candidates = ['created', 'pubdate', 'ctime', 'senddate', 'pub_time'];
+  for (const key of candidates) {
+    const v = raw[key];
+    if (typeof v === 'number' && Number.isFinite(v) && v > 0) return secondsToIso(Math.floor(v));
+    if (typeof v === 'string' && /^\d{9,11}$/.test(v.trim())) return secondsToIso(Number(v.trim()));
+    if (typeof v === 'string' && !Number.isNaN(Date.parse(v))) return new Date(v).toISOString();
+  }
+  return null;
+}
+
+/** 播放量：投稿列表/搜索用 `play`，详情用 `view` / `click` */
+export function parseViews(raw: Record<string, unknown>): number | null {
+  const candidates = ['play', 'view', 'click'];
+  for (const key of candidates) {
+    const v = raw[key];
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return Math.floor(v);
+    if (typeof v === 'string' && /^\d+$/.test(v.trim())) return Number(v.trim());
+  }
+  return null;
+}
+
+/** UP 主：列表/搜索用 `author` + `mid`，详情用 `owner.name` + `owner.mid` */
+export function parseAuthor(raw: Record<string, unknown>): {
+  authorName?: string;
+  authorMid?: number;
+} {
+  const out: { authorName?: string; authorMid?: number } = {};
+  const nameRaw = raw.author ?? (raw.owner as { name?: unknown } | undefined)?.name;
+  const midRaw = raw.mid ?? (raw.owner as { mid?: unknown } | undefined)?.mid;
+  if (typeof nameRaw === 'string' && nameRaw.trim()) out.authorName = nameRaw.trim();
+  if (typeof midRaw === 'number' && midRaw > 0) out.authorMid = midRaw;
+  return out;
 }
 
 const rawVideoSchema = z
@@ -91,19 +137,27 @@ export function normalizeVideoList(
           .filter(Boolean)
       : [];
     const cover = isValidUrl(v.pic) ? v.pic : undefined;
-    // V0.1.1：兼容 number/string duration
-    const durationSec = parseDurationToSeconds((item as { duration?: unknown }).duration ?? v.duration);
+    const rest = item as Record<string, unknown>;
+    // V0.1.3（P0-3）：真实投稿列表字段是 length / created / play / author / mid，
+    // 这里按优先级取候选字段，全部缺失时为 null（未知），不制造 0 / 当前时间。
+    const durationSec = parseDurationToSeconds(rest.length ?? rest.duration);
+    const pubTime = parsePubTimeToIso(rest);
+    const views = parseViews(rest) ?? undefined;
+    const { authorName, authorMid } = parseAuthor(rest);
     const candidate = {
       id: newId('vd'),
       bvid: v.bvid,
       aid: v.aid,
       creatorId: opts.creatorId,
       title: v.title,
-      description: v.desc,
+      description: typeof rest.description === 'string' ? rest.description : v.desc,
       cover,
-      pubTime: secondsToIso(v.pubdate || Math.floor(Date.now() / 1000)),
+      pubTime,
       duration: durationSec,
-      category: v.tname,
+      category: typeof rest.typename === 'string' && rest.typename ? rest.typename : v.tname,
+      authorName,
+      authorMid,
+      views,
       tags,
       url: `https://www.bilibili.com/video/${v.bvid}`,
       createdAt: now,
@@ -134,13 +188,14 @@ const statRespSchema = z
       .object({
         bvid: z.string(),
         aid: z.number().int(),
-        view: z.number().int().nonnegative().default(0),
-        like: z.number().int().nonnegative().default(0),
-        coin: z.number().int().nonnegative().default(0),
-        favorite: z.number().int().nonnegative().default(0),
-        share: z.number().int().nonnegative().default(0),
-        reply: z.number().int().nonnegative().default(0),
-        danmaku: z.number().int().nonnegative().default(0),
+        // V0.1.3：指标缺失 → null，不再 default(0)
+        view: z.number().int().nonnegative().optional(),
+        like: z.number().int().nonnegative().optional(),
+        coin: z.number().int().nonnegative().optional(),
+        favorite: z.number().int().nonnegative().optional(),
+        share: z.number().int().nonnegative().optional(),
+        reply: z.number().int().nonnegative().optional(),
+        danmaku: z.number().int().nonnegative().optional(),
       })
       .passthrough()
       .optional(),
@@ -150,13 +205,13 @@ const statRespSchema = z
 export interface VideoStat {
   bvid: string;
   aid: number;
-  views: number;
-  likes: number;
-  coins: number;
-  favorites: number;
-  shares: number;
-  comments: number;
-  danmaku: number;
+  views: number | null;
+  likes: number | null;
+  coins: number | null;
+  favorites: number | null;
+  shares: number | null;
+  comments: number | null;
+  danmaku: number | null;
 }
 
 export function normalizeVideoStat(raw: unknown): VideoStat | null {
@@ -166,12 +221,12 @@ export function normalizeVideoStat(raw: unknown): VideoStat | null {
   return {
     bvid: d.bvid,
     aid: d.aid,
-    views: d.view,
-    likes: d.like,
-    coins: d.coin,
-    favorites: d.favorite,
-    shares: d.share,
-    comments: d.reply,
-    danmaku: d.danmaku,
+    views: d.view ?? null,
+    likes: d.like ?? null,
+    coins: d.coin ?? null,
+    favorites: d.favorite ?? null,
+    shares: d.share ?? null,
+    comments: d.reply ?? null,
+    danmaku: d.danmaku ?? null,
   };
 }

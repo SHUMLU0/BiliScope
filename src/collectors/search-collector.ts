@@ -22,10 +22,10 @@ import { httpGet } from '@utils/http';
 import { logger } from '@utils/logger';
 import { nowIso } from '@utils/time';
 import { newId } from '@utils/id';
-import { secondsToIso } from '@utils/time';
 import { BILI_REFERRER, biliCode, isBiliBlocked } from '@utils/bili';
 import { buildWbiQuery, refreshWbi } from '@utils/wbi';
 import { videoSchema, type Video } from '@models/video';
+import { parseAuthor, parseDurationToSeconds, parsePubTimeToIso, parseViews } from '@normalizers/video';
 import type { Collector, CollectorInput, CollectorResult } from './types';
 
 interface BiliSearchResp {
@@ -33,10 +33,25 @@ interface BiliSearchResp {
   message?: string;
   ttl?: number;
   data?: {
-    result?: { video?: unknown[] };
+    /**
+     * 真实响应（2026-09 实机抓取，见 tests/fixtures/real/search-type-wbi.json）：
+     * `data.result` 是 **数组**，不是 `{ video: [] }`。
+     * 旧实现只读 `data.result.video`，在无 WBI / 新版接口下拿到 0 条。
+     */
+    result?: unknown[] | { video?: unknown[] };
     page?: number;
     numResults?: number;
+    numPages?: number;
   };
+}
+
+/** 从搜索响应里取出视频数组，兼容 result 为数组 / { video: [] } 两种真实形态 */
+export function extractSearchVideos(raw: unknown): unknown[] {
+  const data = (raw as BiliSearchResp | undefined)?.data;
+  const r = data?.result;
+  if (Array.isArray(r)) return r;
+  if (r && typeof r === 'object' && Array.isArray(r.video)) return r.video;
+  return [];
 }
 
 function isValidUrl(s: string | undefined | null): s is string {
@@ -59,23 +74,12 @@ export function stripSearchHighlight(html: string): string {
     .trim();
 }
 
-/** 解析搜索结果里 "MM:SS" / "HH:MM:SS" 字符串为秒 */
-export function parseSearchDuration(raw: unknown): number {
-  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.max(0, Math.floor(raw));
-  if (typeof raw === 'string') {
-    const s = raw.trim();
-    if (!s) return 0;
-    if (/^\d+(\.\d+)?$/.test(s)) return Math.max(0, Math.floor(Number(s)));
-    if (s.includes(':')) {
-      const parts = s.split(':').map((p) => Number(p.trim()));
-      if (parts.every((p) => Number.isFinite(p) && p >= 0)) {
-        let total = 0;
-        for (const p of parts) total = total * 60 + p;
-        return Math.max(0, Math.floor(total));
-      }
-    }
-  }
-  return 0;
+/**
+ * 解析搜索结果里 "MM:SS" / "HH:MM:SS" 字符串为秒。
+ * V0.1.3（P0-3）：与投稿列表统一 —— 解析不出来返回 null（未知），不再伪装成 0s。
+ */
+export function parseSearchDuration(raw: unknown): number | null {
+  return parseDurationToSeconds(raw);
 }
 
 interface RawSearchVideo {
@@ -117,9 +121,9 @@ export function normalizeSearchVideo(raw: unknown, opts: { now?: string } = {}):
 
   // V0.1.2（P0-4）：UP 与播放信息必须保留，不能像之前那样整条丢掉。
   // creatorId 用稳定的 uid:{mid}（此前是字面量 'search'，导致 Radar 的 UP 列全是 search）
-  const authorMid = typeof r.mid === 'number' && r.mid > 0 ? r.mid : undefined;
-  const authorName = typeof r.author === 'string' && r.author.trim() ? r.author.trim() : undefined;
-  const views = typeof r.play === 'number' && Number.isFinite(r.play) && r.play >= 0 ? r.play : undefined;
+  const rest = raw as Record<string, unknown>;
+  const { authorName, authorMid } = parseAuthor(rest);
+  const views = parseViews(rest) ?? undefined;
 
   const candidate = {
     id: newId('vd'),
@@ -129,7 +133,8 @@ export function normalizeSearchVideo(raw: unknown, opts: { now?: string } = {}):
     title: title.slice(0, 500),
     description: (r.description ?? '').slice(0, 5000),
     cover: isValidUrl(r.pic) ? r.pic : undefined,
-    pubTime: secondsToIso(typeof r.pubdate === 'number' ? r.pubdate : Math.floor(Date.now() / 1000)),
+    // V0.1.3：拿不到 pubdate 就是 null，不退回 Date.now()
+    pubTime: parsePubTimeToIso(rest),
     duration: parseSearchDuration(r.duration),
     category: '', // 搜索接口不返回 tname
     tags: tags.slice(0, 50).map((t) => t.slice(0, 50)),
@@ -156,6 +161,14 @@ export function normalizeSearchVideoList(raw: unknown): Video[] {
   return out;
 }
 
+/**
+ * 搜索端点（2026-09-28 实机验证，见 tests/fixtures/real/）：
+ *   - `https://api.bilibili.com/x/web-interface/wbi/search/type`  —— 当前维护资料中的新版分类搜索入口，需 WBI 签名（wts + w_rid）
+ *   - `https://api.bilibili.com/x/web-interface/search/type`      —— 旧入口，目前仍可用，同样需要 WBI 签名（实测未签名会 412）
+ * 认证方式：匿名 + WBI 签名 + bilibili 域 referrer，不用 Cookie。
+ * 失败降级：wbi 端点被拦 → 旧端点（签名）→ 旧端点（未签名）→ 返回错误（不伪造数据）。
+ */
+const SEARCH_ENDPOINT_WBI = 'https://api.bilibili.com/x/web-interface/wbi/search/type';
 const SEARCH_ENDPOINT = 'https://api.bilibili.com/x/web-interface/search/type';
 
 function encodeQuery(params: Record<string, string | number>): string {
@@ -174,7 +187,7 @@ async function buildSearchUrls(
   keyword: string,
   page: number,
   pageSize: number,
-): Promise<{ signedUrl: string | null; plainUrl: string }> {
+): Promise<{ urls: string[] }> {
   const base: Record<string, string | number> = {
     search_type: 'video',
     keyword,
@@ -187,11 +200,14 @@ async function buildSearchUrls(
   const plainUrl = `${SEARCH_ENDPOINT}?${encodeQuery(base)}`;
   try {
     await refreshWbi();
-    const query = await buildWbiQuery(base);
-    return { signedUrl: `${SEARCH_ENDPOINT}?${query}`, plainUrl };
+    const queryWbi = await buildWbiQuery(base);
+    const querySigned = await buildWbiQuery(base);
+    return {
+      urls: [`${SEARCH_ENDPOINT_WBI}?${queryWbi}`, `${SEARCH_ENDPOINT}?${querySigned}`, plainUrl],
+    };
   } catch (e) {
     logger.warn(`search WBI sign failed, use unsigned url: ${e instanceof Error ? e.message : e}`);
-    return { signedUrl: null, plainUrl };
+    return { urls: [plainUrl] };
   }
 }
 
@@ -205,16 +221,28 @@ export class SearchCollector implements Collector<Video> {
     }
     const page = Number(input.context?.page ?? 1);
     try {
-      const { signedUrl, plainUrl } = await buildSearchUrls(keyword, page, 20);
+      const { urls } = await buildSearchUrls(keyword, page, 20);
       const opts = { signal: input.signal, referrer: BILI_REFERRER.search };
 
-      let res = await httpGet<BiliSearchResp>(signedUrl ?? plainUrl, opts);
-      // WBI 签名被判无效（HTTP 200 + code != 0）时用未签名 URL 再试一次
-      if (signedUrl && isBiliBlocked(res) && biliCode(res) !== 0) {
-        logger.warn(`search/type WBI 请求被拦（code=${biliCode(res)}），回退未签名 URL`);
-        res = await httpGet<BiliSearchResp>(plainUrl, opts);
+      // 依次尝试：wbi/search/type(签名) → search/type(签名) → search/type(未签名)
+      let res: BiliSearchResp | null = null;
+      for (const [i, url] of urls.entries()) {
+        try {
+          const r = await httpGet<BiliSearchResp>(url, opts);
+          res = r;
+          const code = biliCode(r);
+          if (code === 0 && extractSearchVideos(r).length > 0) {
+            logger.debug(`search via url#${i} ok, ${extractSearchVideos(r).length} items`);
+            break;
+          }
+          logger.warn(`search url#${i} 不可用（code=${code ?? 'n/a'}），尝试下一个端点`);
+        } catch (e) {
+          logger.warn(`search url#${i} 请求失败: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
-
+      if (!res) {
+        return { ok: false, error: 'search: all endpoints failed', retryable: true };
+      }
       const code = biliCode(res);
       if (code !== 0) {
         return {
@@ -223,7 +251,10 @@ export class SearchCollector implements Collector<Video> {
           retryable: false,
         };
       }
-      const list = normalizeSearchVideoList(res.data?.result?.video ?? []);
+      if (isBiliBlocked(res)) {
+        return { ok: false, error: `search blocked code=${code ?? 'n/a'}`, retryable: false };
+      }
+      const list = normalizeSearchVideoList(extractSearchVideos(res));
       logger.info(`SearchCollector keyword="${keyword}" page=${page} got ${list.length}`);
       return { ok: true, data: list, fetched: true, stats: { added: list.length, updated: 0, unchanged: 0 } };
     } catch (e) {

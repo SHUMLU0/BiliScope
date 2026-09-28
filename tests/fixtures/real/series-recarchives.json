@@ -1,0 +1,63 @@
+{
+  "code": 0,
+  "archivesSample": [
+    {
+      "aid": 117347549515800,
+      "title": "三个两亿像素？OPPO Find X10 Pro Max上手",
+      "pubdate": 1790586000,
+      "ctime": 1790581662,
+      "state": 0,
+      "pic": "http://i1.hdslb.com/bfs/archive/49f2db255bf0a2c640da5582e26080f4ee43fa5e.jpg",
+      "duration": 583,
+      "stat": {
+        "view": 211866
+      },
+      "bvid": "BV1hGaG6vEX2",
+      "ugc_pay": 0,
+      "interactive_video": false,
+      "enable_vt": 0,
+      "vt_display": "",
+      "playback_position": 0,
+      "desc": "OPPO Find X10 Pro Max这次在影像上下了不少功夫，用上了三个2亿像素的传感器，还加入了手机上比较少见的Open Gate视频拍摄。这次我们用它拍了上千张照片和几百个视频，想和你一起看看，这台手机的拍摄体验，到底怎么样？如果这期视频对你有帮助，请多多支持我们，并把视频分享给你的朋友们一起看看～",
+      "upMid": 946974
+    },
+    {
+      "aid": 117337885774958,
+      "title": "延续外观，影像升级？vivo X500 Pro Max 上手",
+      "pubdate": 1790478000,
+      "ctime": 1790434552,
+      "state": 0,
+      "pic": "http://i1.hdslb.com/bfs/archive/aaf88b9b4d67d29c7ff421d46e404a673d051041.jpg",
+      "duration": 674,
+      "stat": {
+        "view": 1364904
+      },
+      "bvid": "BV1Ebho6BE2J",
+      "ugc_pay": 0,
+      "interactive_video": false,
+      "enable_vt": 0,
+      "vt_display": "",
+      "playback_position": 0,
+      "desc": "相比过往几代产品，这次 vivo X 系列的迭代，究竟带来了哪些升级？是硬件上的全新传感器，体验上更专业的操作界面，还是更独特的影像色彩？一起来看看到底有何高明之处？如果你喜欢这期视频，请多多支持我们，并把视频分享给你的朋友们！",
+      "upMid": 946974
+    }
+  ],
+  "archivesKeys": [
+    "aid",
+    "title",
+    "pubdate",
+    "ctime",
+    "state",
+    "pic",
+    "duration",
+    "stat",
+    "bvid",
+    "ugc_pay",
+    "interactive_video",
+    "enable_vt",
+    "vt_display",
+    "playback_position",
+    "desc",
+    "upMid"
+  ]
+}

@@ -103,7 +103,9 @@ describe('normalizeVideoList', () => {
     expect(list[0]!.duration).toBe(3723);
   });
 
-  it('handles garbage duration as 0', () => {
+  // V0.1.3（P0-3）：无法解析的 duration 必须是 null（未知），
+  // 不能写成 0 —— 页面上的 "0s" 会被误读成真实时长。
+  it('garbage duration becomes null (unknown), not 0', () => {
     const raw = {
       code: 0,
       data: {
@@ -113,7 +115,67 @@ describe('normalizeVideoList', () => {
       },
     };
     const list = normalizeVideoList(raw, { creatorId: 'c' });
-    expect(list[0]!.duration).toBe(0);
+    expect(list[0]!.duration).toBeNull();
+  });
+
+  // V0.1.3（P0-4）：真实投稿列表字段是 created / length / play / author / mid
+  // fixture 结构来自 tests/fixtures/real/ 实机抓取的 vlist 字段集合。
+  describe('real arc/search vlist fields', () => {
+    const REAL_VLIST = {
+      code: 0,
+      data: {
+        list: {
+          vlist: [
+            {
+              aid: 123,
+              bvid: 'BV1Test00001',
+              title: '对话汉斯·季默！',
+              created: 1750000000,
+              length: '12:34',
+              play: 123456,
+              author: '影视飓风',
+              mid: 946974,
+              description: 'real description',
+              typeid: 21,
+              pic: 'https://i0.hdslb.com/bfs/archive/x.jpg',
+              comment: 999,
+              video_review: 88,
+            },
+          ],
+        },
+        page: { count: 934, pn: 1, ps: 30 },
+      },
+    };
+
+    it('maps length → duration', () => {
+      const list = normalizeVideoList(REAL_VLIST, { creatorId: 'c1' });
+      expect(list).toHaveLength(1);
+      expect(list[0]!.duration).toBe(12 * 60 + 34);
+    });
+
+    it('maps created → pubTime (no Date.now fallback)', () => {
+      const list = normalizeVideoList(REAL_VLIST, { creatorId: 'c1' });
+      expect(list[0]!.pubTime).toBe(new Date(1750000000 * 1000).toISOString());
+      // 绝不能是"今天"
+      expect(list[0]!.pubTime!.slice(0, 10)).not.toBe(new Date().toISOString().slice(0, 10));
+    });
+
+    it('maps play → views, author → authorName, mid → authorMid', () => {
+      const list = normalizeVideoList(REAL_VLIST, { creatorId: 'c1' });
+      expect(list[0]!.views).toBe(123456);
+      expect(list[0]!.authorName).toBe('影视飓风');
+      expect(list[0]!.authorMid).toBe(946974);
+    });
+
+    it('missing created/length → null, never today / 0s', () => {
+      const raw = {
+        code: 0,
+        data: { list: { vlist: [{ aid: 1, bvid: 'BV1Test00002', title: 'no meta' }] } },
+      };
+      const list = normalizeVideoList(raw, { creatorId: 'c1' });
+      expect(list[0]!.pubTime).toBeNull();
+      expect(list[0]!.duration).toBeNull();
+    });
   });
 });
 
@@ -121,7 +183,8 @@ describe('parseDurationToSeconds', () => {
   it('number passes through', () => {
     expect(parseDurationToSeconds(123)).toBe(123);
     expect(parseDurationToSeconds(0)).toBe(0);
-    expect(parseDurationToSeconds(-1)).toBe(0);
+    // 负数不是"0 秒"，是无效输入 → null
+    expect(parseDurationToSeconds(-1)).toBeNull();
   });
   it('numeric string parses', () => {
     expect(parseDurationToSeconds('123')).toBe(123);
@@ -134,11 +197,12 @@ describe('parseDurationToSeconds', () => {
   it('HH:MM:SS parses', () => {
     expect(parseDurationToSeconds('1:02:03')).toBe(3723);
   });
-  it('garbage returns 0', () => {
-    expect(parseDurationToSeconds('abc')).toBe(0);
-    expect(parseDurationToSeconds(null)).toBe(0);
-    expect(parseDurationToSeconds(undefined)).toBe(0);
-    expect(parseDurationToSeconds({})).toBe(0);
+  // V0.1.3：garbage = 未知 → null（旧实现返回 0，制造出"全部 0s"的假数据）
+  it('garbage returns null', () => {
+    expect(parseDurationToSeconds('abc')).toBeNull();
+    expect(parseDurationToSeconds(null)).toBeNull();
+    expect(parseDurationToSeconds(undefined)).toBeNull();
+    expect(parseDurationToSeconds({})).toBeNull();
   });
 });
 

@@ -18,7 +18,12 @@ import { cachedWithMeta } from '@utils/cache';
 import { logger } from '@utils/logger';
 import { nowIso } from '@utils/time';
 import { newId } from '@utils/id';
-import { normalizeCreatorTotals } from '@normalizers/creator';
+import {
+  normalizeCreator,
+  normalizeCreatorTotals,
+  normalizeNavnum,
+  normalizeRelationStat,
+} from '@normalizers/creator';
 import { creatorRepo, creatorSnapshotRepo } from '@repositories/index';
 import { creatorSchema, type Creator, type CreatorSnapshot } from '@models/creator';
 import { BILI_REFERRER, biliCode, hasBiliData, isBiliBlocked } from '@utils/bili';
@@ -56,6 +61,11 @@ async function buildWbiAccInfoUrl(uid: number): Promise<string | null> {
   }
 }
 
+/** 网络层错误（超时 / 断网 / 5xx）标记 retryable=true；这类错误换接口也没用 */
+function isRetryable(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { retryable?: boolean }).retryable === true;
+}
+
 /**
  * 取 UP 主资料：优先 WBI 接口，失败再退 legacy。
  *
@@ -66,7 +76,7 @@ async function buildWbiAccInfoUrl(uid: number): Promise<string | null> {
 async function fetchAccInfo(
   uid: number,
   signal?: AbortSignal,
-): Promise<{ acc: BiliAccountInfo; via: 'wbi' | 'legacy' }> {
+): Promise<{ acc: BiliAccountInfo; via: 'wbi' | 'legacy' | 'card' }> {
   const referrer = BILI_REFERRER.space(uid);
   const wbiUrl = await buildWbiAccInfoUrl(uid);
   if (wbiUrl) {
@@ -75,14 +85,30 @@ async function fetchAccInfo(
       if (!isBiliBlocked(acc) && hasBiliData(acc)) return { acc, via: 'wbi' };
       logger.warn(`wbi/acc/info 不可用（code=${biliCode(acc)}），降级 legacy acc/info`);
     } catch (e) {
+      // V0.1.3：网络层失败直接抛出，不再逐层降级。
+      // 每层都会跑满 3 次退避重试（800/1600/3200ms），三层叠加会让断网时卡十几秒才报错。
+      if (isRetryable(e)) throw e;
       logger.warn(`wbi/acc/info 请求失败，降级 legacy: ${e instanceof Error ? e.message : e}`);
     }
   }
-  const acc = await httpGet<BiliAccountInfo>(`https://api.bilibili.com/x/space/acc/info?mid=${uid}`, {
-    signal,
-    referrer,
-  });
-  return { acc, via: 'legacy' };
+  try {
+    const acc = await httpGet<BiliAccountInfo>(`https://api.bilibili.com/x/space/acc/info?mid=${uid}`, {
+      signal,
+      referrer,
+    });
+    if (!isBiliBlocked(acc) && hasBiliData(acc)) return { acc, via: 'legacy' };
+    logger.warn(`legacy acc/info 不可用（code=${biliCode(acc)}），降级 /x/web-interface/card`);
+  } catch (e) {
+    if (isRetryable(e)) throw e;
+    logger.warn(`legacy acc/info 请求失败，降级 card: ${e instanceof Error ? e.message : e}`);
+  }
+  // 第三级：/x/web-interface/card（无 WBI，实测在本机匿名环境可用，
+  // 见 tests/fixtures/real/card.json：name / fans / attention / level_info 均为真实值）
+  const acc = await httpGet<BiliAccountInfo>(
+    `https://api.bilibili.com/x/web-interface/card?mid=${uid}&photo=false`,
+    { signal, referrer },
+  );
+  return { acc, via: 'card' };
 }
 
 export class CreatorCollector implements Collector<Creator> {
@@ -102,12 +128,9 @@ export class CreatorCollector implements Collector<Creator> {
         async () => {
           const { acc, via } = await fetchAccInfo(uid, input.signal);
           logger.debug(`CreatorCollector uid=${uid} via=${via}`);
-          const d = acc.data;
-          if (!d || typeof d !== 'object' || !d.mid) {
-            throw new Error(
-              `acc/info returned invalid data (code=${acc.code ?? 'n/a'} msg=${acc.message ?? 'n/a'})`,
-            );
-          }
+          // V0.1.3（P0-1）：字段映射统一交给 normalizer，不再在 collector 里 `?? 0`。
+          const base = normalizeCreator(acc, { now: nowIso() });
+
           // upstat 在无登录态下可能失败（-352 / 403），不应中断整个 creator 采集；
           // 失败时 totals 为 null（未知），不是 0。
           const stat = await httpGet<unknown>(`https://api.bilibili.com/x/space/upstat?mid=${uid}`, {
@@ -117,23 +140,52 @@ export class CreatorCollector implements Collector<Creator> {
             logger.warn(`upstat unavailable for uid=${uid}: ${e instanceof Error ? e.message : String(e)}`);
             return null;
           });
-            const totals = normalizeCreatorTotals(stat);
+          const totals = normalizeCreatorTotals(stat);
+
+          // 二级补充来源（实机验证可用，且匿名无 Cookie）：
+          //   /x/relation/stat  → 真实 follower / following
+          //   /x/space/navnum   → 真实 video（投稿数）
+          // 只有当一级字段缺失时才请求，避免无谓增加请求量。
+          let followers = base.followers;
+          let following = base.following;
+          let videoCount = base.videoCount;
+          if (followers === null || following === null) {
+            const rel = await httpGet<unknown>(
+              `https://api.bilibili.com/x/relation/stat?vmid=${uid}`,
+              { signal: input.signal, referrer: BILI_REFERRER.space(uid) },
+            ).catch((e: unknown) => {
+              logger.warn(`relation/stat unavailable for uid=${uid}: ${e instanceof Error ? e.message : String(e)}`);
+              return null;
+            });
+            const r = normalizeRelationStat(rel);
+            followers = followers ?? r.followers;
+            following = following ?? r.following;
+            logger.debug(
+              `CreatorCollector uid=${uid} relation/stat code=${rel === null ? 'err' : (biliCode(rel) ?? 'n/a')} follower=${r.followers ?? 'null'}`,
+            );
+          }
+          if (videoCount === null) {
+            const nav = await httpGet<unknown>(
+              `https://api.bilibili.com/x/space/navnum?mid=${uid}`,
+              { signal: input.signal, referrer: BILI_REFERRER.space(uid) },
+            ).catch((e: unknown) => {
+              logger.warn(`navnum unavailable for uid=${uid}: ${e instanceof Error ? e.message : String(e)}`);
+              return null;
+            });
+            videoCount = normalizeNavnum(nav).videoCount;
+            logger.debug(
+              `CreatorCollector uid=${uid} navnum code=${nav === null ? 'err' : (biliCode(nav) ?? 'n/a')} video=${videoCount ?? 'null'}`,
+            );
+          }
+
           const now = nowIso();
           const candidate = {
-            id: newId('cr'),
-            uid: d.mid,
-            name: d.name ?? `uid_${d.mid}`,
-            avatar: d.face || undefined,
-            sign: d.sign ?? '',
-            level: d.level_info?.current_level ?? 0,
-            followers: d.fans ?? 0,
-            following: d.following ?? 0,
-            videoCount: d.archive_count ?? 0,
-            spaceUrl: `https://space.bilibili.com/${d.mid}/`,
+            ...base,
+            followers,
+            following,
+            videoCount,
             lastCollectedAt: now,
-            createdAt: now,
             updatedAt: now,
-            source: 'bili-api' as const,
             _totals: totals,
           };
           // 解析时不期望 _totals 字段

@@ -24,6 +24,36 @@
 - GitHub 仓库推送因当前环境无 `gh` CLI / 无 git credential，未自动执行。
 - Gemini Adapter 实现但 V0.1 不测试（环境无 Key）。
 
+## [V0.1.3] - 2026-09-28
+
+Chrome 实机验收（UID 946974 · 影视飓风）后最小修复：根因是"采到了数据但归一化字段映射错了"。
+本轮**先读真实 API 响应**（`scripts/probe-real-api.ts` 落盘 14 份真实响应到 `tests/fixtures/real/`），再决定映射。
+
+### Fixed — P0
+
+- **P0-1 / P0-2 Creator 字段映射与可空化**
+  - 真实 `/x/space/wbi/acc/info` 用 `fans / attention / archive_count`；新增三级来源 `/x/relation/stat`(follower/following) + `/x/space/navnum`(video)
+  - 新增第三级 fallback `/x/web-interface/card`（`mid` 为字符串、`following` 为布尔）
+  - `CreatorSnapshot.followers/following/videoCount/level` 全面可空；**彻底删除所有 `?? 0`**，未知一律 `null`，UI 显示 `–`
+- **P0-3 VideoNormalizer 真实字段**
+  - 投稿列表 `data.list.vlist[]` 用 `created`(时间戳) / `length`("12:34") / `play` / `author` / `mid`
+  - `duration` 解析不出 → `null`（不再回退 0）；`pubTime` 用 `created`/`pubdate`，**绝不回退 `Date.now()`**
+- **P0-4 真实 fixture 测试**：`tests/fixtures/real/arc-search-wbi.json` 验证 created→pubTime（≠今天）、length→duration、play→views、author→authorName、mid→authorMid、缺失→null
+- **P0-5 VideoCollector 不再逐条 `/view`**：默认 `fetchDetails=false`，列表 `play`→初始 `VideoSnapshot`；日志 `list requests=N, detail view requests=M`（实测 M=0）
+- **P0-6 Video / VideoSnapshot 拆分**：稳定字段归 Video，时变指标归 VideoSnapshot（均 `number | null`）
+
+### Fixed — P1
+
+- **SearchCollector 真实链路**：真实 `search/type` 的 `data.result` 是数组（非 `{video:[]}`）；端点 `/x/web-interface/wbi/search/type`→降级 `/search/type`→未签名；保留全部真实字段；Radar 显示真实 UP 名 + 播放
+- **HTTP 5xx 重试修复**：旧实现 catch 中无条件 `status:undefined` 抹掉 5xx→永不重试；现 `503→503→200` 成功、`503×4` 失败
+- **Import 替换原子性**：先全量 Zod 校验，任一非法则整体拒绝（旧数据不动）；全部合法才单事务 `clear+bulkPut`
+- **Smoke 语义三态**：`PASS` / `PASS_WITH_ENV_LIMIT` / `FAIL`；风控失败绝不叫 PASS；新增真实 E2E 链路测试
+- **版本号统一**：package.json / manifest.json / DEPLOYMENT / CHANGELOG / FINAL_AUDIT / PROGRESS 全部对齐 V0.1.3
+
+### Known limitations
+
+- 匿名 + 无 Cookie 环境下，`/x/space/wbi/acc/info` 与 `/x/space/wbi/arc/search` 仍可能被判风控（code=-352/-412）。已用 `/x/web-interface/card` + `/x/relation/stat` + `/x/space/navnum` 作为匿名可用的补充来源，但**真实全量视频列表在无 Cookie 时仍可能拿不全**（见 FINAL_AUDIT § 实机验收清单）。
+
 ## [V0.1.2] - 2026-09-28
 
 独立验收第二轮：V0.1.1「工程上基本成型」，但真实 B 站链路未通过验收。

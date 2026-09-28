@@ -100,7 +100,9 @@ describe('CreatorCollector', () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.retryable).toBe(true);
-  }, 8000);
+    // V0.1.3：HTTP 重试修好后，网络错误真的会重试 3 次（800/1600/3200ms 退避）。
+    // nav + 主接口两条链路 ≈ 11s，8s 超时已不够，这里放宽到 30s。
+  }, 30_000);
 
   it('malformed response → not retryable', async () => {
     globalThis.fetch = vi.fn(async () => new Response('not json', { status: 200 })) as unknown as typeof fetch;

@@ -140,12 +140,24 @@ async function main(): Promise<void> {
       'web-interface/nav': NAV_MOCK,
       'space/wbi/arc/search': {
         code: 0,
-        data: { vlist: [{ bvid: 'BV1xxxxxxxxx', aid: 1, title: 't', pubdate: 1700000000, duration: 100 }] },
+        // V0.1.3（P0-5/P0-6）：列表自带 play/created/length，默认不再逐个请求 /view。
+        // 这里用真实字段 created / length / play，验证「列表数据 → 初始 VideoSnapshot」链路。
+        data: {
+          vlist: [
+            { bvid: 'BV1xxxxxxxxx', aid: 1, title: 't', created: 1700000000, length: '01:40', play: 10000 },
+          ],
+        },
       },
       // V0.1.2：WBI 被拦时的降级目标（legacy arc/search）
       'space/arc/search': {
         code: 0,
-        data: { list: { vlist: [{ bvid: 'BV1xxxxxxxxx', aid: 1, title: 't', pubdate: 1700000000, duration: 100 }] } },
+        data: {
+          list: {
+            vlist: [
+              { bvid: 'BV1xxxxxxxxx', aid: 1, title: 't', created: 1700000000, length: '01:40', play: 10000 },
+            ],
+          },
+        },
       },
       'web-interface/view': {
         code: 0,

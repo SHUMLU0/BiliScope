@@ -84,7 +84,22 @@ export class VideoCollector implements Collector<Video> {
     return this.collectByCreator(Number(input.targetId), input.signal);
   }
 
-  async collectByCreator(uid: number, signal?: AbortSignal): Promise<CollectorResult<Video>> {
+  /**
+   * 拉取某 UP 主的投稿列表。
+   *
+   * V0.1.3（P0-5）：默认**不再**对每个视频逐个请求 /x/web-interface/view。
+   *   旧实现最坏 7 页 × 30 条 = 210 次额外请求，极易触发风控且毫无必要 ——
+   *   投稿列表本身已提供 play / video_review / comment / created / length / author / mid。
+   *   只有显式传入 `fetchDetails` 时才补详情，且受 `maxDetailFetches` 限制。
+   *
+   * V0.1.3（P0-6）：列表里给出的 play 会写成一条初始 VideoSnapshot（其余指标 null），
+   *   这样以后才能回答"刚发布时多少播放，现在多少播放"。
+   */
+  async collectByCreator(
+    uid: number,
+    signal?: AbortSignal,
+    opts: { fetchDetails?: boolean; maxDetailFetches?: number } = {},
+  ): Promise<CollectorResult<Video>> {
     if (!Number.isFinite(uid) || uid <= 0) {
       return { ok: false, error: `invalid uid: ${uid}`, retryable: false };
     }
@@ -92,17 +107,21 @@ export class VideoCollector implements Collector<Video> {
     if (!creator) {
       return { ok: false, error: `creator not found for uid=${uid}`, retryable: false };
     }
+    const fetchDetails = opts.fetchDetails === true;
+    const maxDetailFetches = opts.maxDetailFetches ?? 10;
 
     try {
       const out: Video[] = [];
       let pn = 1;
       const ps = 30;
-      // 阶段化：最多 200 条 / UP 主
       let added = 0;
       let updated = 0;
       let unchanged = 0;
+      let listRequests = 0;
+      let detailRequests = 0;
       while (pn <= 7) {
         const res = await fetchArcSearchPage(uid, pn, ps, signal);
+        listRequests++;
         const videos = normalizeVideoList(res, { creatorId: creator.id });
         if (!videos.length) break;
         for (const v of videos) {
@@ -114,38 +133,62 @@ export class VideoCollector implements Collector<Video> {
           if (upserted.added || upserted.updated) {
             out.push({ ...v, id: actualVideoId });
           }
-          // 拉单条 stat
-          try {
-            const stat = await httpGet<unknown>(
-              `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(v.bvid)}`,
-              { signal, referrer: BILI_REFERRER.video(v.bvid) },
-            );
-            const norm = normalizeVideoStat(stat);
-            if (norm) {
-              const snap: VideoSnapshot = {
-                id: newId('vs'),
-                videoId: actualVideoId,
-                timestamp: nowIso(),
-                views: norm.views,
-                likes: norm.likes,
-                coins: norm.coins,
-                favorites: norm.favorites,
-                shares: norm.shares,
-                comments: norm.comments,
-                danmaku: norm.danmaku,
-                source: 'bili-api',
-              };
-              const parsed = videoSnapshotSchema.safeParse(snap);
-              if (parsed.success) await videoSnapshotRepo.add(parsed.data);
+          // 列表里自带的播放量 → 初始 snapshot（其余指标保持 null）
+          if (typeof v.views === 'number') {
+            const snap: VideoSnapshot = {
+              id: newId('vs'),
+              videoId: actualVideoId,
+              timestamp: nowIso(),
+              views: v.views,
+              likes: null,
+              coins: null,
+              favorites: null,
+              shares: null,
+              comments: null,
+              danmaku: null,
+              source: 'bili-api',
+            };
+            const parsed = videoSnapshotSchema.safeParse(snap);
+            if (parsed.success) await videoSnapshotRepo.add(parsed.data);
+          }
+          // 仅在显式要求时补详情，且不超过上限
+          if (fetchDetails && detailRequests < maxDetailFetches) {
+            detailRequests++;
+            try {
+              const stat = await httpGet<unknown>(
+                `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(v.bvid)}`,
+                { signal, referrer: BILI_REFERRER.video(v.bvid) },
+              );
+              const norm = normalizeVideoStat(stat);
+              if (norm) {
+                const snap: VideoSnapshot = {
+                  id: newId('vs'),
+                  videoId: actualVideoId,
+                  timestamp: nowIso(),
+                  views: norm.views ?? null,
+                  likes: norm.likes ?? null,
+                  coins: norm.coins,
+                  favorites: norm.favorites,
+                  shares: norm.shares,
+                  comments: norm.comments,
+                  danmaku: norm.danmaku,
+                  source: 'bili-api',
+                };
+                const parsed = videoSnapshotSchema.safeParse(snap);
+                if (parsed.success) await videoSnapshotRepo.add(parsed.data);
+              }
+            } catch (e) {
+              logger.warn(`stat failed for bvid=${v.bvid}: ${e instanceof Error ? e.message : e}`);
             }
-          } catch (e) {
-            logger.warn(`stat failed for bvid=${v.bvid}: ${e instanceof Error ? e.message : e}`);
           }
         }
         if (videos.length < ps) break;
         pn++;
       }
-      logger.info(`VideoCollector uid=${uid} collected ${out.length} (added=${added} updated=${updated} unchanged=${unchanged})`);
+      logger.info(
+        `VideoCollector uid=${uid} collected ${out.length} (added=${added} updated=${updated} unchanged=${unchanged}) ` +
+          `list requests = ${listRequests}, detail view requests = ${detailRequests}`,
+      );
       return { ok: true, data: out, fetched: true, stats: { added, updated, unchanged } };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

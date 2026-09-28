@@ -85,6 +85,6 @@ downloadBlob(toJsonBlob(payload), `biliscope-${new Date().toISOString().slice(0,
 
 ## 七、版本
 
-当前：**v0.1.0**
+当前：**v0.1.3**（V0.1.1 数据链路修复 + V0.1.2 真实链路最小修复 + V0.1.3 归一化字段映射修复）
 
 下一版本：**v0.2.0** —— 见 `FINAL_AUDIT.md` § 9。

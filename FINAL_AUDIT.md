@@ -1,6 +1,6 @@
 # FINAL_AUDIT.md — BiliScope V0.1 最终审计
 
-> 生成于 2026-09-28 · V0.1.0 + V0.1.1 修复补丁 · **本地全门禁通过 + CI 绿色** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-28 · 当前版本 **V0.1.3**（V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复）· **本地全门禁通过 + CI 绿色** · GitHub: https://github.com/SHUMLU0/BiliScope
 
 ---
 
@@ -208,6 +208,52 @@ V0.1 提交后独立验收发现 7 项真实数据链路问题，未要求重构
 | TD-07 | Popup UI 没做 mobile 适配 | popup 通常固定宽度，但 future-proof |
 
 ---
+
+## 0-ter. V0.1.3 修复（Chrome 实机验收 · 归一化字段映射）
+
+> 本轮由独立审计员**实际在 Chrome 里加载 V0.1.2 的 dist** 采集 UID 946974（影视飓风）触发。
+> 关键结论（原文）：**"不是'B站没采到数据'，而是'采到了数据，但归一化字段映射错了'"** ——
+> 粉丝=0、关注=0、投稿=0、趋势快照全 0、视频发布时间全显示今天、时长全 0s。
+>
+> 本轮严格遵守执行原则：**先读真实 API，再决定字段映射**。新增 `scripts/probe-real-api.ts`，
+> 把真实响应落盘到 `tests/fixtures/real/`（14 份），所有字段映射均源于此，未用任何 mock 数据伪造真实接口成功。
+
+### 修复清单（P0 × 6 + P1 × 5）
+
+| 编号 | 级别 | 问题 | 修复 | 验证 |
+|---|---|---|---|---|
+| #1 | P0 | Creator 计数器被 `?? 0` 强制成 0；真实 `/x/space/wbi/acc/info` 用 `fans/attention/archive_count`，非 `following/archive_count` | 三级来源：`wbi/acc/info` → `legacy acc/info` → `/x/web-interface/card`（`mid` 为字符串、`following` 为布尔）；补充 `/x/relation/stat`(follower/following) + `/x/space/navnum`(video)；彻底删除 `?? 0`，未知一律 `null` | `tests/normalizers/creator.test.ts`：缺失→null 非 0；真实 `wbi/acc/info` 的 `fans/attention/archive_count`；`relation/stat` + `navnum` 用例 |
+| #2 | P0 | `CreatorSnapshot.followers/following/videoCount` 不可空，强制 0 | schema 改 `number \| null`；UI 显示 `–` | 同上 |
+| #3 | P0 | `VideoNormalizer` 读 `pubdate`/`duration`，缺失回退 `Date.now()` 与 `0` | 真实列表字段 `created`(时间戳)/`length`("12:34")/`play`/`author`/`mid`；`duration` 解析不出→`null`，`pubTime` 用 `created`/`pubdate`，**绝不回退 `Date.now()`** | `tests/normalizers/video.test.ts`：length→duration、created→pubTime（断言≠今天）、play→views、author→authorName、mid→authorMid、garbage→null |
+| #4 | P0 | Normalizer 测试只覆盖 mock，未用真实结构 | 新增 `tests/fixtures/real/arc-search-wbi.json`（真实 `created/length/play/author/mid`），四个断言全部基于真实字段 | 同上 |
+| #5 | P0 | `VideoCollector` 对每个视频（约 210 个）逐个请求 `/view` | 默认 `fetchDetails=false`；列表自带 `play`→初始 `VideoSnapshot`（其余 null）；仅在显式要求时补详情且受 `maxDetailFetches` 限制 | `tests/smoke/e2e-chain.test.ts`：断言 `detail view requests = 0`；日志 `list requests=N, detail view requests=0` |
+| #6 | P0 | Video 稳定字段与时效指标混在一起，无法回答"发布时 vs 现在" | 拆分：`Video`（bvid/aid/title/author/pubTime/duration/category/tags/creatorId）与 `VideoSnapshot`（views/likes/coins/favorites/shares/comments/danmaku，均 `number \| null`） | `src/models/video.ts` schema 拆分 |
+| #7 | P1 | SearchCollector 假设 `data.result.video`，真实是数组 | 真实 `search/type` 的 `data.result` 为**数组**；端点 `/x/web-interface/wbi/search/type`→降级 `/search/type`→未签名；保留 bvid/aid/mid/author/title/description/play/duration/pubdate/tag | `tests/collectors/search.test.ts`：真实数组结构用例 |
+| #8 | P1 | HTTP 5xx 永不重试（catch 里无条件 `status:undefined` 抹掉 5xx） | 仅在无 status 时置 undefined；`retryable` 正确；指数退避 | `tests/utils/http.test.ts`：`503→503→200` 成功、`503×4` 失败、status/retryable 保留 |
+| #9 | P1 | Import 先 `clear` 再发现数据坏了 | 先全量 Zod 校验，任一非法则**整体拒绝**（旧数据不动）；全部合法才单事务 `clear+bulkPut` | `tests/services/export-import.test.ts`：`replace 整体拒绝` + 全合法事务用例 |
+| #10 | P1 | Smoke 把风控失败也叫 PASS | 语义三态 `PASS`/`PASS_WITH_ENV_LIMIT`/`FAIL`；新增 `tests/smoke/classify.ts` + 真实 E2E 链路 | `tests/smoke/real-api.test.ts` + `e2e-chain.test.ts` |
+| #11 | P1 | 版本号散落不一致 | package.json / manifest.json / DEPLOYMENT / CHANGELOG / FINAL_AUDIT / PROGRESS 全部对齐 **V0.1.3** | 见各文件 |
+
+### 最终验收结论（严格分级，不合并）
+
+| 类别 | 结论 | 依据 |
+|---|---|---|
+| **① 离线单测通过** | ✅ | `vitest run` **151/151 PASS**（21 文件）；typecheck 0 · lint 0 · build OK · 0 secrets · TEST 001-009 PASSED |
+| **② 真实 API 可验证（离线用真实抓取响应）** | ✅ | `tests/fixtures/real/` 14 份真实响应（nav / wbi acc/info / legacy / card / upstat / arc-search×2 / search-type×3 / relation-stat / navnum / view …）驱动的 normalizer + collector 用例全部通过；证明**字段映射已对齐真实 B 站结构** |
+| **③ 真实 API 受风控无法验证（匿名 + 无 Cookie 出口）** | ⚠️ 诚实保留降级 | 实机/自动化探测显示：本机出口对 space 系列整体风控 —— `wbi/acc/info` 返回 `code=-352`、`legacy acc/info` 返回 `-799`、`wbi/arc/search` 返回 `HTTP 412`。已用匿名可用的 `/x/web-interface/card` + `/x/relation/stat` + `/x/space/navnum` 作为补充来源拿到真实 粉丝/关注/投稿/等级，但**全量视频列表在无 Cookie 时仍可能拿不全** |
+| **④ Chrome 实机验收（UID 946974）** | ⏳ 待用户手动加载 dist 确认 | 见下方「实机验收清单」；本轮代码产物已通过 ①+②，③ 的降级路径已实测可用（smoke 显示 `uid=946974 followers=18443072 following=686 videoCount=946 level=6`） |
+
+### 实机验收清单（Chrome 加载 `dist/` 后逐项核对）
+
+1. 影视飓风主页：粉丝 = 真实非零（≈18,443,072）；关注 / 投稿 = 真实值或 `–`（绝不 0 伪装）；等级 = 真实（6）。
+2. 趋势快照：无伪造 0 点；仅在有真实数据时落点。
+3. 视频列表：标题真实；发布时间为真实日期（**非全部"今天"**）；时长为真实秒数（**非全部 "0s"**）。
+4. Radar 页：标题 / UP 名 / 播放量 / BVID / 时长 均来自真实字段（**UP 不得显示 `search`**）。
+
+> 注：本轮 CI / 自动化已证明 ① + ② + ③ 降级路径可用；④ 需用户在真实 Chrome 环境加载 `dist/` 做最终肉眼确认，审计方不得代签。
+
+**门禁顺序固定**：typecheck → test → lint → build → secret-scan → acceptance → git status → commit → push → CI。
+
 
 ## 9. 下一阶段建议（V0.2）
 

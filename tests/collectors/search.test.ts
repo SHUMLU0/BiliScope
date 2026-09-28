@@ -31,9 +31,10 @@ describe('parseSearchDuration', () => {
   it('parses number', () => {
     expect(parseSearchDuration(120)).toBe(120);
   });
-  it('returns 0 on garbage', () => {
-    expect(parseSearchDuration('abc')).toBe(0);
-    expect(parseSearchDuration(null)).toBe(0);
+  // V0.1.3：garbage = 未知 → null（不再伪装成 0s）
+  it('returns null on garbage', () => {
+    expect(parseSearchDuration('abc')).toBeNull();
+    expect(parseSearchDuration(null)).toBeNull();
   });
 });
 

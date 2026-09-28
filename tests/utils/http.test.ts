@@ -82,6 +82,59 @@ describe('http', () => {
     }
   });
 
+  // V0.1.3（P1-HTTP retry）：
+  // 旧实现在 catch 里无条件 `status: undefined`，把 5xx 的 status 抹掉，
+  // 导致 retryable 恒为 false —— 5xx 一次都不会重试。下面两条是回归测试。
+  it('5xx 触发重试并最终成功（503 → 503 → 200）', async () => {
+    const orig = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = vi.fn().mockImplementation(async () => {
+      calls++;
+      if (calls < 3) return new Response('busy', { status: 503, headers: { 'Content-Type': 'text/plain' } });
+      return new Response(JSON.stringify({ ok: 1 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    try {
+      const r = await httpGet<{ ok: number }>('https://example.com', { backoffBaseMs: 1 });
+      expect(r.ok).toBe(1);
+      expect(calls).toBe(3);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it('连续 5xx 达到重试上限后失败（503 × 4）', async () => {
+    const orig = globalThis.fetch;
+    const mocked = vi.fn().mockResolvedValue(
+      new Response('busy', { status: 503, headers: { 'Content-Type': 'text/plain' } }),
+    );
+    globalThis.fetch = mocked as unknown as typeof fetch;
+    try {
+      await expect(httpGet('https://example.com', { backoffBaseMs: 1 })).rejects.toThrow(/503/);
+      // 默认 retries=3 → 共 4 次请求
+      expect(mocked).toHaveBeenCalledTimes(4);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  it('5xx 错误保留 status 字段（retryable 的依据）', async () => {
+    const orig = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response('busy', { status: 500, headers: { 'Content-Type': 'text/plain' } }),
+    ) as unknown as typeof fetch;
+    try {
+      await expect(httpGet('https://example.com', { retries: 0, backoffBaseMs: 1 })).rejects.toMatchObject({
+        status: 500,
+        retryable: true,
+      });
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
   it('post sends json body and parses', async () => {
     const orig = globalThis.fetch;
     const mocked = vi.fn().mockResolvedValue(

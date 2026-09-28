@@ -1,0 +1,8 @@
+{
+  "code": -352,
+  "message": "风控校验失败",
+  "ttl": 1,
+  "data": {
+    "v_voucher": "voucher_7677a1d0-1102-4a9d-8eb8-24e1f510721a"
+  }
+}

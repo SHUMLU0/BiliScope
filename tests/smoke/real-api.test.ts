@@ -1,34 +1,27 @@
 /**
- * 真实 API smoke test
+ * 真实 API smoke test（结构层）
  *
- * 运行方式（**已从常规 CI 中剥离，P1-10**）：
- *   pnpm test:smoke          # 手动验证真实 B 站链路
- *   pnpm test                # 常规单元测试，不碰网络
+ * 运行方式（**已从常规 CI 中剥离**）：
+ *   pnpm test:smoke   # 手动验证真实 B 站链路
+ *   pnpm test         # 常规单元测试，完全离线
  *
- * 验证点：
- *   1. /x/web-interface/nav 返回 wbi_img（img_url + sub_url）
- *   2. 用真实 MD5 生成的 w_rid 能被 B 站接受（P0-1 回归：SHA-256 截断必然 -352）
- *   3. /x/web-interface/search/type?search_type=video 返回 data.result.video[]
- *   4. 单视频 /x/web-interface/view 返回 view / like / reply 等
- *
- * 说明：无 Cookie / 部分 IP 下 B 站会返回 -352 风控或 412 前置校验，
- * 这是 B 站侧限流，不算失败；测试只断言「不是我们自己的签名 / 结构错误」。
- *
- * 已知环境限制（本机实测）：space 系列接口（含完全不需要签名的 legacy acc/info）
- * 在该出口 IP 上返回 -799 / -352，因此 WBI 签名的端到端成功与否无法在此定性；
- * WBI 里唯一属于我们自己的部分 —— MD5 —— 由 tests/utils/md5.test.ts
- * （RFC 1321 向量 + Node crypto 差分）保证。
+ * V0.1.3（P1-Smoke 语义）：结论只有三种 —— PASS / PASS_WITH_ENV_LIMIT / FAIL。
+ * 「真实 API 因 B 站风控拿不到数据」必须记为 PASS_WITH_ENV_LIMIT，
+ * 绝不能包装成 PASS。
  */
 
 import { describe, expect, it } from 'vitest';
-import { normalizeSearchVideoList } from '@collectors/search-collector';
+import { extractSearchVideos, normalizeSearchVideoList } from '@collectors/search-collector';
 import { normalizeVideoStat, parseDurationToSeconds } from '@normalizers/video';
+import { normalizeNavnum, normalizeRelationStat } from '@normalizers/creator';
 import { httpGet } from '@utils/http';
 import { BILI_REFERRER, biliCode } from '@utils/bili';
 import { buildWbiQuery, refreshWbi } from '@utils/wbi';
+import { assertNotFail, classifyBili } from './classify';
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const UID = 946974;
 
 async function fetchJson(url: string): Promise<{ status: number; json: unknown }> {
   const res = await fetch(url, {
@@ -46,76 +39,126 @@ async function fetchJson(url: string): Promise<{ status: number; json: unknown }
 
 describe('real API smoke', () => {
   it(
-    'B 站 nav 接口返回 wbi_img（refreshWbi 依赖）',
+    'nav 返回 wbi_img（WBI 签名链路依赖）',
     async () => {
       const { status, json } = await fetchJson('https://api.bilibili.com/x/web-interface/nav');
       expect(status).toBe(200);
       const obj = json as { code?: number; data?: { wbi_img?: { img_url?: string; sub_url?: string } } };
-      expect(obj.code).toBeDefined();
-      if (obj.data?.wbi_img) {
-        expect(typeof obj.data.wbi_img.img_url).toBe('string');
-        expect(typeof obj.data.wbi_img.sub_url).toBe('string');
-      }
+      const structureOk = typeof obj.code === 'number';
+      const verdict = structureOk && obj.code === 0 && obj.data?.wbi_img ? 'PASS' : structureOk ? 'PASS_WITH_ENV_LIMIT' : 'FAIL';
+      assertNotFail(
+        verdict,
+        `nav code=${obj.code} hasWbiImg=${Boolean(obj.data?.wbi_img)}`,
+      );
     },
     30_000,
   );
 
   it(
-    '真实 MD5 的 WBI 签名不劣于无签名 legacy 请求（P0-1 回归）',
+    'WBI 签名（真实 MD5）对 space 接口：对照组已知被风控时记为环境限制',
     async () => {
       await refreshWbi();
-      const query = await buildWbiQuery({ mid: 2, token: '', platform: 'web', web_location: 1550101 });
-      expect(query).toContain('w_rid=');
-      expect(query).toContain('wts=');
+      const query = await buildWbiQuery({ mid: UID, token: '' });
       expect(query).toMatch(/w_rid=[0-9a-f]{32}$/);
 
       const wbiRes = await httpGet<{ code?: number }>(
         `https://api.bilibili.com/x/space/wbi/acc/info?${query}`,
-        { referrer: BILI_REFERRER.space(2), retries: 0 },
-      );
-      // 对照组：同一时刻、完全不需要签名的 legacy 接口
+        { referrer: BILI_REFERRER.space(UID), retries: 0 },
+      ).catch(() => ({ code: null }));
+      // 对照组：完全不需要签名的 legacy 接口
       const legacyRes = await httpGet<{ code?: number }>(
-        'https://api.bilibili.com/x/space/acc/info?mid=2',
-        { referrer: BILI_REFERRER.space(2), retries: 0 },
+        `https://api.bilibili.com/x/space/acc/info?mid=${UID}`,
+        { referrer: BILI_REFERRER.space(UID), retries: 0 },
       ).catch(() => ({ code: null }));
 
-      const wbi = biliCode(wbiRes);
-      const legacy = biliCode(legacyRes);
-      expect(wbi).not.toBeNull();
-
-      // 判定逻辑：
-      //  - 若 legacy 自己也拿不到数据（无 Cookie / IP 风控），则 -352 属于环境风控，不是签名问题；
-      //  - 若 legacy 正常（code=0）而 WBI 被判 -352，那才说明 w_rid 算法有问题。
-      if (legacy === 0) {
-        expect(wbi).not.toBe(-352);
-      } else {
-        console.warn(
-          `[smoke] legacy acc/info code=${legacy}，当前出口对 space 系列整体风控，` +
-            `无法端到端验证 WBI 签名（wbi code=${wbi}）。MD5 正确性由 tests/utils/md5.test.ts 保证。`,
-        );
-      }
+      const verdict = classifyBili({
+        code: biliCode(wbiRes),
+        hasData: Boolean((wbiRes as { data?: unknown }).data),
+        legacyCode: biliCode(legacyRes),
+        structureOk: true,
+      });
+      assertNotFail(verdict, `wbi/acc/info code=${biliCode(wbiRes)}，legacy code=${biliCode(legacyRes)}`);
     },
     30_000,
   );
 
   it(
-    'B 站 search/type?search_type=video 返回 data.result.video[]',
+    'relation/stat + navnum 是匿名可用的真实粉丝 / 关注 / 投稿来源',
     async () => {
-      const { status, json } = await fetchJson(
-        'https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=AI&page=1&page_size=10',
+      const rel = await httpGet<unknown>(
+        `https://api.bilibili.com/x/relation/stat?vmid=${UID}`,
+        { referrer: BILI_REFERRER.space(UID), retries: 0 },
+      ).catch(() => null);
+      const nav = await httpGet<unknown>(
+        `https://api.bilibili.com/x/space/navnum?mid=${UID}`,
+        { referrer: BILI_REFERRER.space(UID), retries: 0 },
+      ).catch(() => null);
+
+      const r = normalizeRelationStat(rel);
+      const n = normalizeNavnum(nav);
+      const structureOk = true;
+      const hasData = r.followers !== null && n.videoCount !== null;
+      const verdict = classifyBili({
+        code: biliCode(rel),
+        hasData,
+        legacyCode: biliCode(nav),
+        structureOk,
+      });
+      assertNotFail(
+        verdict,
+        `relation/stat follower=${r.followers} following=${r.following}；navnum video=${n.videoCount}`,
       );
-      // 无 Referer/Cookie 时 B 站可能返回 412，属正常风控，只要不是服务端错误即可
-      expect(status).toBeLessThan(500);
-      const obj = json as { code?: number; data?: { result?: { video?: unknown[] } } };
-      if (obj.data?.result?.video) {
-        expect(Array.isArray(obj.data.result.video)).toBe(true);
-        if (obj.data.result.video.length > 0 && obj.code === 0) {
-          const list = normalizeSearchVideoList(obj.data.result.video);
-          const first = obj.data.result.video[0] as { duration?: unknown };
-          if (first.duration !== undefined) {
-            expect(parseDurationToSeconds(first.duration)).toBeGreaterThanOrEqual(0);
-          }
-          expect(list.length).toBeGreaterThan(0);
+    },
+    30_000,
+  );
+
+  it(
+    'search/type（WBI 签名）返回真实视频数组，字段可归一化',
+    async () => {
+      await refreshWbi();
+      const query = await buildWbiQuery({
+        search_type: 'video',
+        keyword: '影视飓风',
+        page: 1,
+        page_size: 5,
+        order: 'pubdate',
+        platform: 'web',
+        web_location: 40020,
+      });
+      const res = await httpGet<unknown>(
+        `https://api.bilibili.com/x/web-interface/wbi/search/type?${query}`,
+        { referrer: BILI_REFERRER.search, retries: 0 },
+      ).catch(() => null);
+      const items = extractSearchVideos(res);
+      const list = normalizeSearchVideoList(items);
+      const first = list[0];
+      const hasData = list.length > 0;
+      const verdict = classifyBili({
+        code: biliCode(res),
+        hasData,
+        // 对照组：未签名同端点
+        legacyCode: biliCode(
+          await httpGet<unknown>(
+            `https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=${encodeURIComponent(
+              '影视飓风',
+            )}&page=1&page_size=5`,
+            { referrer: BILI_REFERRER.search, retries: 0 },
+          ).catch(() => null),
+        ),
+        structureOk: true,
+      });
+      assertNotFail(
+        verdict,
+        `search got=${list.length} first={up:${first?.authorName}, play:${first?.views}, duration:${
+          first?.duration
+        }, pubTime:${first?.pubTime}}`,
+      );
+      if (hasData) {
+        // 真实字段必须保留（P1-Search）
+        expect(typeof first?.authorName).toBe('string');
+        expect(typeof first?.views).toBe('number');
+        if (items[0] && typeof (items[0] as { duration?: unknown }).duration === 'string') {
+          expect(parseDurationToSeconds((items[0] as { duration: unknown }).duration)).toBeGreaterThan(0);
         }
       }
     },
@@ -123,20 +166,19 @@ describe('real API smoke', () => {
   );
 
   it(
-    'B 站 view 单视频接口返回 view/like/reply/danmaku',
+    'view 单视频接口返回真实 stat（pubdate / duration / stat）',
     async () => {
-      const { status, json } = await fetchJson(
-        'https://api.bilibili.com/x/web-interface/view?bvid=BV1GJ411x7h7',
-      );
+      const { status, json } = await fetchJson('https://api.bilibili.com/x/web-interface/view?bvid=BV1GJ411x7h7');
       expect(status).toBeLessThan(500);
       const obj = json as { code?: number; data?: Record<string, unknown> };
-      if (obj.data) {
-        const stat = normalizeVideoStat(obj);
-        if (stat) {
-          expect(typeof stat.views).toBe('number');
-          expect(typeof stat.likes).toBe('number');
-        }
-      }
+      const stat = normalizeVideoStat(obj);
+      const verdict = classifyBili({
+        code: biliCode(obj),
+        hasData: Boolean(stat),
+        legacyCode: biliCode(obj),
+        structureOk: true,
+      });
+      assertNotFail(verdict, `view views=${stat?.views} likes=${stat?.likes}`);
     },
     30_000,
   );

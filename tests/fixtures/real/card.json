@@ -1,0 +1,48 @@
+{
+  "code": 0,
+  "message": "OK",
+  "cardKeys": [
+    "mid",
+    "name",
+    "approve",
+    "sex",
+    "rank",
+    "face",
+    "face_nft",
+    "face_nft_type",
+    "DisplayRank",
+    "regtime",
+    "spacesta",
+    "birthday",
+    "place",
+    "description",
+    "article",
+    "attentions",
+    "fans",
+    "friend",
+    "attention",
+    "sign",
+    "level_info",
+    "pendant",
+    "nameplate",
+    "Official",
+    "official_verify",
+    "vip",
+    "is_senior_member",
+    "name_render"
+  ],
+  "cardSample": {
+    "mid": "946974",
+    "name": "影视飓风",
+    "fans": 18443009,
+    "attention": 686,
+    "level_info": {
+      "current_level": 6,
+      "current_min": 0,
+      "current_exp": 0,
+      "next_exp": 0
+    },
+    "sign": "无限进步！｜商务合作请联系邮箱：bd@ysjf.com（邮件中麻烦备注公司、咨询内容）｜店铺名：影视飓风"
+  },
+  "archive_count": 946
+}

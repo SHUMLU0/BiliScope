@@ -19,6 +19,16 @@ export function CreatorPage() {
   const [status, setStatus] = useState('');
   const [aiText, setAiText] = useState('');
 
+  // V0.1.3：哪些指标本次真的没拿到（null），在状态区如实说明，不用 0 糊过去
+  const unavailable = creator
+    ? [
+        creator.followers === null ? '粉丝' : null,
+        creator.following === null ? '关注' : null,
+        creator.videoCount === null ? '投稿' : null,
+        creator.level === null ? '等级' : null,
+      ].filter((x): x is string => x !== null)
+    : [];
+
   const refresh = async (c: Creator): Promise<void> => {
     const [sn, vd] = await Promise.all([
       creatorSnapshotRepo.listByCreator(c.id),
@@ -44,7 +54,7 @@ export function CreatorPage() {
       setStatus('返回为空');
       return;
     }
-    setStatus(`已采集 ${c.name}（${c.followers} 粉丝）`);
+    setStatus(`已采集 ${c.name}（粉丝 ${formatInt(c.followers)}）`);
     setCreator(c);
     await refresh(c);
     setStatus('采集视频列表…');
@@ -107,8 +117,11 @@ export function CreatorPage() {
               <Metric label="粉丝" value={formatInt(creator.followers)} />
               <Metric label="关注" value={formatInt(creator.following)} />
               <Metric label="投稿" value={formatInt(creator.videoCount)} />
-              <Metric label="等级" value={String(creator.level)} />
+              <Metric label="等级" value={formatInt(creator.level)} />
             </div>
+            {unavailable.length > 0 && (
+              <div className="faint">该字段当前不可用（匿名接口未提供）：{unavailable.join('、')}</div>
+            )}
             <div className="row">
               <button onClick={handleAI}>AI 分析</button>
               <a href={`https://space.bilibili.com/${creator.uid}/`} target="_blank" rel="noreferrer">
@@ -160,6 +173,7 @@ export function CreatorPage() {
                     <th>标题</th>
                     <th>发布时间</th>
                     <th>时长</th>
+                    <th>播放</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -169,8 +183,9 @@ export function CreatorPage() {
                         <a href={`comment.html?bvid=${v.bvid}`}>{v.title}</a>
                         <div className="faint">{v.bvid}</div>
                       </td>
-                      <td className="faint">{v.pubTime.slice(0, 10)}</td>
+                      <td className="faint">{v.pubTime ? v.pubTime.slice(0, 10) : '–'}</td>
                       <td>{formatDuration(v.duration)}</td>
+                      <td className="faint">{formatInt(v.views)}</td>
                     </tr>
                   ))}
                 </tbody>

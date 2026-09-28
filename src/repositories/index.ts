@@ -81,13 +81,22 @@ export const videoRepo = {
   async findByBvid(bvid: string): Promise<Video | undefined> {
     return db.videos.where('bvid').equals(bvid).first();
   },
+  /**
+   * V0.1.3：pubTime 允许为 null，而 IndexedDB 索引不收录 null 值，
+   * 继续用 `sortBy('pubTime')` 会把「发布时间未知」的视频整条丢掉（UI 上凭空消失）。
+   * 改为按 creatorId 取回后在内存排序：有时间的按时间倒序，未知时间排最后。
+   */
   async listByCreator(creatorId: string, opts: { limit?: number; offset?: number } = {}): Promise<Video[]> {
-    return db.videos
-      .where('creatorId')
-      .equals(creatorId)
-      .reverse()
-      .sortBy('pubTime')
-      .then((arr) => arr.reverse().slice(opts.offset ?? 0, (opts.offset ?? 0) + (opts.limit ?? 50)));
+    const arr = await db.videos.where('creatorId').equals(creatorId).toArray();
+    arr.sort((a, b) => {
+      const x = a.pubTime;
+      const y = b.pubTime;
+      if (x === y) return 0;
+      if (!x) return 1;
+      if (!y) return -1;
+      return x < y ? 1 : -1;
+    });
+    return arr.slice(opts.offset ?? 0, (opts.offset ?? 0) + (opts.limit ?? 50));
   },
   async countByCreator(creatorId: string): Promise<number> {
     return db.videos.where('creatorId').equals(creatorId).count();

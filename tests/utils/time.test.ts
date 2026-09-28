@@ -20,8 +20,12 @@ describe('time', () => {
     expect(formatDuration(0)).toBe('0s');
   });
 
-  it('formatDuration: negative -> 0s', () => {
-    expect(formatDuration(-10)).toBe('0s');
+  // V0.1.3：null / 负数 = 未知 → '–'，不再显示 '0s'（会被误读成真实时长 0）
+  it('formatDuration: null/unknown -> –', () => {
+    expect(formatDuration(null)).toBe('–');
+    expect(formatDuration(undefined)).toBe('–');
+    expect(formatDuration(-10)).toBe('–');
+    expect(formatDuration(Number.NaN)).toBe('–');
   });
 
   it('formatDuration: days', () => {

@@ -134,13 +134,17 @@ export async function httpJson<T = unknown>(
       return (await res.json()) as T;
     } catch (e) {
       clearTimeout(t);
+      // V0.1.3（P1-HTTP）：修复「5xx 永远识别不到」的 bug。
+      // 旧实现在这里无条件 `status: undefined`，把 makeHttpError('HTTP 503', {status:503})
+      // 里的 status 抹掉，导致 retryable 恒为 false，5xx 一次都不会重试。
+      // 现在：只对本来没有 status 的错误（网络中断 / abort）置 undefined。
+      const thrown = e as HttpError;
       const err: HttpError =
         e instanceof Error
-          ? Object.assign(e as HttpError, {
+          ? Object.assign(thrown, {
               retryable: false,
-              status: undefined,
+              status: typeof thrown.status === 'number' ? thrown.status : undefined,
               url,
-              body: undefined,
             })
           : makeHttpError(String(e));
       const isAbort = err.name === 'AbortError';
