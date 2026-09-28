@@ -24,6 +24,26 @@
 - GitHub 仓库推送因当前环境无 `gh` CLI / 无 git credential，未自动执行。
 - Gemini Adapter 实现但 V0.1 不测试（环境无 Key）。
 
+## [V0.1.4] - 2026-09-28
+
+Chrome 实机（影视飓风）在 V0.1.3 修复归一化后**仍**显示视频「全部 0s / 当天日期」。根因是**数据迁移失败**：`videoRepo.upsertByBvid()` 只比较 `title + tags.length` 就返回 `unchanged`，历史脏记录无法被重新采集自愈。
+
+### Fixed — P0
+
+- **P0-1 `videoRepo.upsertByBvid()` 业务字段比较**
+  - 新增 `videoBusinessChanged(a, b)`：比较 aid / creatorId / title / description / cover / pubTime / duration / category / url / authorName / authorMid / views / tags（JSON 序列化），任一不同即判定为变更
+  - 旧实现只比较 `title` + `tags.length` → 历史脏数据（`pubTime=今天`、`duration=0`、`views=null`，由 V0.1.0/V0.1.2 写入）重采集时永远 `unchanged`，Chrome 长期显示「0s / 今天」
+- **P0-2 更新保留首次采集时间**
+  - `upsert` 更新时展开 `video` 后显式保留 `existing.createdAt`（首次采集时间）、刷新 `updatedAt`、沿用旧主键 `id`，避免把新采集时间写回 `createdAt`
+- **P0-3 新增回归测试**
+  - `tests/repositories/index.test.ts`：同 title+tags 但 `pubTime/duration/views` 变化 → `updated=1` + 回读字段已纠正 + `createdAt` 保留
+  - 字段完全相同 → `unchanged=1`
+
+### Known limitations
+
+- **必须由用户在 Chrome 实机对影视飓风重新采集一次**验证脏数据被 `upsert` 自愈；本修复不依赖清空数据库（清空库是规避，不是修复）。
+- 缩略图 / 视频预览等视觉项仍属 V0.2 技术债，非阻塞。
+
 ## [V0.1.3] - 2026-09-28
 
 Chrome 实机验收（UID 946974 · 影视飓风）后最小修复：根因是"采到了数据但归一化字段映射错了"。

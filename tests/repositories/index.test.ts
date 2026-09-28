@@ -113,6 +113,49 @@ describe('videoRepo', () => {
     const list = await videoRepo.listByCreator('c1');
     expect(list).toHaveLength(2);
   });
+
+  // V0.1.4（P0-数据迁移）：旧实现只比较 title + tags.length，于是「标题/标签没变，
+  // 但 pubTime/duration/views 变了」被判 unchanged，历史脏数据（V0.1.0/0.1.2 写入的
+  // 0s / 今天）永远不被修正，Chrome 实机长期显示「0s / 今天」。这条回归用例必须覆盖该场景。
+  it('P0: 旧记录 title+tags 相同但 pubTime/duration/views 变化时必须更新（纠正历史脏数据）', async () => {
+    const bvid = 'BV1xx411c7m5';
+    // 模拟早期版本写入的脏数据：duration=0、views 缺失、pubTime=采集时（今天）
+    const dirty = videoSchema.parse({
+      ...makeVideo('BV1xx411c7m5', 'c9'),
+      duration: 0,
+      views: undefined,
+    });
+    const r0 = await videoRepo.upsertByBvid(dirty);
+    expect(r0.added).toBe(1);
+
+    // 重新采集拿到正确数据：title/tags 没变，但 pubTime/duration/views 变了
+    const fresh = videoSchema.parse({
+      ...dirty,
+      pubTime: '2026-08-01T12:00:00.000Z',
+      duration: 632,
+      views: 123456,
+    });
+    const r1 = await videoRepo.upsertByBvid(fresh);
+    expect(r1.updated).toBe(1);
+    expect(r1.unchanged).toBe(0);
+
+    const stored = await videoRepo.findByBvid(bvid);
+    expect(stored).toBeDefined();
+    expect(stored!.pubTime).toBe('2026-08-01T12:00:00.000Z');
+    expect(stored!.duration).toBe(632);
+    expect(stored!.views).toBe(123456);
+    // 首次采集时间必须保留，不能被重新采集时间覆盖
+    expect(stored!.createdAt).toBe(dirty.createdAt);
+  });
+
+  it('业务字段完全相同（含 title+tags）时返回 unchanged', async () => {
+    const v = makeVideo('BV1xx411c7m6', 'c9');
+    expect((await videoRepo.upsertByBvid(v)).added).toBe(1);
+    const again = videoSchema.parse({ ...v });
+    const r = await videoRepo.upsertByBvid(again);
+    expect(r.unchanged).toBe(1);
+    expect(r.updated).toBe(0);
+  });
 });
 
 describe('ideaRepo', () => {

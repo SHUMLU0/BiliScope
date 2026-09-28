@@ -65,6 +65,33 @@ export const creatorSnapshotRepo = {
 
 // ─────────────────────────────────────────────────────────── Video
 
+/**
+ * V0.1.4（P0-数据迁移）：判断一条 Video 的业务字段是否发生变化。
+ *
+ * 旧实现只比较 `title` + `tags.length`，于是「标题相同、标签数量相同，但
+ * pubTime / duration / views / author / description / category / cover 变了」
+ * 的情况一律被判为 unchanged —— 历史脏数据（V0.1.0/V0.1.2 写入的
+ * pubTime=今天、duration=0、views=null）永远不被修正，Chrome 实机于是
+ * 长期显示「0s / 今天」。这里改为比较所有可变的业务字段。
+ */
+function videoBusinessChanged(a: Video, b: Video): boolean {
+  return (
+    a.aid !== b.aid ||
+    a.creatorId !== b.creatorId ||
+    a.title !== b.title ||
+    a.description !== b.description ||
+    a.cover !== b.cover ||
+    a.pubTime !== b.pubTime ||
+    a.duration !== b.duration ||
+    a.category !== b.category ||
+    a.url !== b.url ||
+    a.authorName !== b.authorName ||
+    a.authorMid !== b.authorMid ||
+    a.views !== b.views ||
+    JSON.stringify(a.tags) !== JSON.stringify(b.tags)
+  );
+}
+
 export const videoRepo = {
   async upsertByBvid(video: Video): Promise<UpsertResult> {
     const existing = await db.videos.where('bvid').equals(video.bvid).first();
@@ -72,10 +99,18 @@ export const videoRepo = {
       await db.videos.add(video);
       return { added: 1, updated: 0, unchanged: 0, ids: [video.id] };
     }
-    if (existing.title === video.title && existing.tags.length === video.tags.length) {
+    // V0.1.4（P0-数据迁移）：按业务字段比较，而非只看 title + tags.length。
+    if (!videoBusinessChanged(existing, video)) {
       return { added: 0, updated: 0, unchanged: 1, ids: [existing.id] };
     }
-    await db.videos.update(existing.id, { ...video, id: existing.id });
+    // 更新时保留原始 createdAt（首次采集时间），刷新 updatedAt，主键沿用旧 id。
+    // 先展开 video，再用旧记录的真实 createdAt 覆盖，避免把新采集时间写回。
+    await db.videos.update(existing.id, {
+      ...video,
+      id: existing.id,
+      createdAt: existing.createdAt,
+      updatedAt: nowIso(),
+    });
     return { added: 0, updated: 1, unchanged: 0, ids: [existing.id] };
   },
   async findByBvid(bvid: string): Promise<Video | undefined> {

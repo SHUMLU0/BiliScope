@@ -1,10 +1,29 @@
 # FINAL_AUDIT.md — BiliScope V0.1 最终审计
 
-> 生成于 2026-09-28 · 当前版本 **V0.1.3**（V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复）· **本地全门禁通过 + CI 绿色** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-28 · 当前版本 **V0.1.4**（V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → **V0.1.4 数据迁移修复：videoRepo.upsertByBvid 业务字段比较**）· **本地全门禁通过 + CI 绿色** · GitHub: https://github.com/SHUMLU0/BiliScope
 
 ---
 
-## 0-bis. V0.1.2 修复（独立验收第二轮 · P0 x4 + P1 x6）
+## 0-quater. V0.1.4 修复（数据迁移 · videoRepo.upsertByBvid 业务字段比较）
+
+> 触发：Chrome 实机（UID 946974 · 影视飓风）在 V0.1.3 修复 normalizer 后**仍然**显示视频「全部 0s / 当天日期」。
+> 经排查，根因不是字段映射，而是**数据迁移失败**：V0.1.3 只修了归一化，但 `videoRepo.upsertByBvid()`
+> 仍只比较 `title + tags.length` 就返回 `unchanged`，于是历史脏 `Video`（`pubTime=今天`、`duration=0`、`views=null`，
+> 由 V0.1.0/V0.1.2 写入）在重新采集时**永远不会被更新**。一句话：**代码修复成功，数据迁移失败**。
+
+| 编号 | 级别 | 问题 | 修复 | 验证 |
+|---|---|---|---|---|
+| #1 | P0 | `videoRepo.upsertByBvid()` 仅比较 `title` + `tags.length` 即返回 `unchanged`；`pubTime/duration/views` 等变化被忽略，历史脏数据无法自愈 | 新增 `videoBusinessChanged(a,b)` 比较全部可变业务字段（aid/creatorId/title/description/cover/pubTime/duration/category/url/authorName/authorMid/views/tags）；变化时执行更新 | `tests/repositories/index.test.ts`：新增 2 条回归用例 |
+| #2 | P0 | 更新时会把 `createdAt`（首次采集时间）覆盖成新采集时间 | 更新时展开 `video` 后显式保留 `existing.createdAt`、刷新 `updatedAt`、沿用旧主键 `id` | 回归用例断言 `stored.createdAt === dirty.createdAt`（保留首次采集时间） |
+
+**新增回归用例（`tests/repositories/index.test.ts`）**：
+- `P0: 旧记录 title+tags 相同但 pubTime/duration/views 变化时必须更新`：`upsert` 脏数据（duration=0/views 缺失）→ 再 `upsert` 正确数据（title/tags 不变，pubTime/duration/views 变）→ 断言 `updated=1`、`unchanged=0`、回读 `pubTime/duration/views` 已纠正、`createdAt` 保留首次采集时间。
+- `业务字段完全相同（含 title+tags）时返回 unchanged`：同记录二次 `upsert` → `unchanged=1`、`updated=0`。
+
+**门禁**：typecheck 0 · lint 0 · `pnpm test` **153/153** · build OK · 0 secrets · TEST 001-009 PASSED。
+**关键约束（用户明确要求）**：**不通过清空数据库规避代码问题**；修复后由用户在 Chrome 实机对 影视飓风 重新采集一次，确认脏数据被 `upsert` 自愈，而非靠清库。
+
+---
 
 第二轮验收结论：V0.1.1 「工程上基本成型」，但**不算真实 B 站链路验收通过**。本轮按指定范围做最小修复（不做 V0.2、不重做 UI、不做架构重构）。
 

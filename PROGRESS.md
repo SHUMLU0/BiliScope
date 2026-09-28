@@ -5,6 +5,22 @@
 
 ---
 
+## V0.1.4 修复（数据迁移 · videoRepo.upsertByBvid 业务字段比较）
+
+> 触发：独立审计员在 Chrome 实机（UID 946974 · 影视飓风）加载 V0.1.3 dist 后，**视频仍全部 0s / 当天日期**。
+> 排查结论：「代码修复成功，数据迁移失败」——V0.1.3 只修了 `normalizer`，但 `videoRepo.upsertByBvid()` 仍只比较 `title + tags.length` 即返回 `unchanged`，
+> 于是 V0.1.0/V0.1.2 写入的脏 `Video`（`pubTime=今天`、`duration=0`、`views=null`）在重新采集时永远不被更新。
+
+| # | 级别 | 阶段 | 状态 | 备注（真实证据） |
+|---|---|---|---|---|
+| 1 | P0 | `videoRepo.upsertByBvid` 业务字段比较 | ✅ | 新增 `videoBusinessChanged(a,b)` 比较 aid/creatorId/title/description/cover/pubTime/duration/category/url/authorName/authorMid/views/tags；旧实现只看 `title+tags.length` → 历史脏数据无法自愈 |
+| 2 | P0 | 更新保留首次采集时间 | ✅ | 更新时展开 `video` 后显式保留 `existing.createdAt`、`updatedAt:nowIso()`、沿用旧 `id`；不再把新采集时间写回 `createdAt` |
+| 3 | P0 | 回归测试 | ✅ | `tests/repositories/index.test.ts` 新增 2 条：同 title+tags 但 pubTime/duration/views 变 → `updated=1` + 回读纠正 + `createdAt` 保留；字段全同 → `unchanged=1` |
+| — | — | 门禁全绿 | ✅ | 153/153 单测（含 2 新用例）· typecheck 0 · lint 0 · build OK · 0 secrets · TEST 001-009 PASSED |
+| — | — | 用户实机复验 | ⏳ | 用户需在 Chrome 对影视飓风**重新采集一次**，确认脏数据被 `upsert` 自愈；**不靠清空数据库规避** |
+
+---
+
 ## V0.1.3 修复（Chrome 实机验收 · 归一化字段映射 + 三层降级 + 原子导入）
 
 > 触发：独立审计员**实际在 Chrome 里加载 V0.1.2 dist** 采集 UID 946974（影视飓风），
