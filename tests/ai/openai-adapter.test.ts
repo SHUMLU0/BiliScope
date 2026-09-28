@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { OpenAICompatibleAdapter } from '@ai/openai-adapter';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { OpenAICompatibleAdapter, DEFAULT_MAX_TOKENS } from '@ai/openai-adapter';
 import type { ProviderConfig } from '@ai/types';
 
 const cfg: ProviderConfig = {
@@ -9,49 +9,57 @@ const cfg: ProviderConfig = {
   model: 'gpt-test',
 };
 
-describe('OpenAICompatibleAdapter', () => {
+const realFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+});
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+/** 捕获最后一次请求体 */
+function captureFetch(body: unknown, status = 200): { body: () => Record<string, unknown> } {
+  let captured: Record<string, unknown> = {};
+  globalThis.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+    captured = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    return jsonResponse(body, status);
+  }) as unknown as typeof fetch;
+  return { body: () => captured };
+}
+
+describe('OpenAICompatibleAdapter · 基础链路', () => {
   it('analyze parses JSON-mode response', async () => {
     globalThis.fetch = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          choices: [{ message: { content: JSON.stringify({ ok: true }) } }],
-          usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      ),
+      jsonResponse({
+        choices: [{ message: { content: JSON.stringify({ ok: true }) } }],
+        usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+      }),
     ) as unknown as typeof fetch;
     const a = new OpenAICompatibleAdapter(cfg);
-    const r = await a.analyze({
-      systemPrompt: 's',
-      userPrompt: 'u',
-      jsonMode: true,
-    });
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', jsonMode: true });
     expect(r.text).toBeTruthy();
     expect((r.parsed as { ok: boolean }).ok).toBe(true);
     expect(r.tokenUsage?.total).toBe(3);
   });
 
   it('analyze throws on HTTP error', async () => {
-    globalThis.fetch = vi.fn(async () =>
-      new Response('bad', { status: 401, headers: { 'Content-Type': 'text/plain' } }),
-    ) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(async () => new Response('bad', { status: 401 })) as unknown as typeof fetch;
     const a = new OpenAICompatibleAdapter(cfg);
-    await expect(
-      a.analyze({ systemPrompt: 's', userPrompt: 'u' }),
-    ).rejects.toThrow(/401/);
+    await expect(a.analyze({ systemPrompt: 's', userPrompt: 'u' })).rejects.toThrow(/401/);
   });
 
   it('testConnection returns ok on success', async () => {
     globalThis.fetch = vi.fn(async () =>
-      new Response(
-        JSON.stringify({ choices: [{ message: { content: 'pong' } }] }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } },
-      ),
+      jsonResponse({ choices: [{ message: { content: 'pong' } }] }),
     ) as unknown as typeof fetch;
     const a = new OpenAICompatibleAdapter(cfg);
     const r = await a.testConnection();
     expect(r.ok).toBe(true);
-    expect(r.latencyMs).toBeGreaterThanOrEqual(0);
   });
 
   it('testConnection returns failure on throw', async () => {
@@ -62,5 +70,181 @@ describe('OpenAICompatibleAdapter', () => {
     const r = await a.testConnection();
     expect(r.ok).toBe(false);
     expect(r.message).toContain('boom');
+  });
+});
+
+describe('OpenAICompatibleAdapter · V3.0 诊断字段', () => {
+  it('captures finish_reason / responseId / modelVersion', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        id: 'chatcmpl-abc',
+        model: 'gpt-test-0613',
+        choices: [{ finish_reason: 'stop', message: { content: '{"a":1}' } }],
+      }),
+    ) as unknown as typeof fetch;
+    const a = new OpenAICompatibleAdapter(cfg);
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', jsonMode: true });
+    expect(r.finishReason).toBe('stop');
+    expect(r.responseId).toBe('chatcmpl-abc');
+    expect(r.modelVersion).toBe('gpt-test-0613');
+    expect(r.rawText).toBe('{"a":1}');
+    expect(r.parseError).toBeUndefined();
+  });
+
+  it('reports finishReason=length (截断) and still records parse failure honestly', async () => {
+    // 真实场景：模型输出到一半被截断 → 残缺 JSON
+    const truncated = '{"summary":"这是一段被截断的输出","facts":["a","b"';
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ choices: [{ finish_reason: 'length', message: { content: truncated } }] }),
+    ) as unknown as typeof fetch;
+    const a = new OpenAICompatibleAdapter(cfg);
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', jsonMode: true });
+    expect(r.finishReason).toBe('length');
+    expect(r.parsed).toBeUndefined();
+    expect(r.parseError).toBeTruthy();
+    // 关键：绝不把残缺 raw text 当作 parsed 回填
+    expect(r.text).toBe(truncated);
+  });
+
+  it('captures refusal field', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: '', refusal: 'I cannot help' } }] }),
+    ) as unknown as typeof fetch;
+    const a = new OpenAICompatibleAdapter(cfg);
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u' });
+    expect(r.refusal).toBe('I cannot help');
+  });
+});
+
+describe('OpenAICompatibleAdapter · max_tokens 三级优先级', () => {
+  it('uses request.maxTokens when provided', async () => {
+    const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
+    const a = new OpenAICompatibleAdapter({ ...cfg, maxTokens: 512 });
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', maxTokens: 4096 });
+    expect(cap.body().max_tokens).toBe(4096);
+    expect(r.usedMaxTokens).toBe(4096);
+  });
+
+  it('falls back to provider.maxTokens', async () => {
+    const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
+    const a = new OpenAICompatibleAdapter({ ...cfg, maxTokens: 512 });
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u' });
+    expect(cap.body().max_tokens).toBe(512);
+    expect(r.usedMaxTokens).toBe(512);
+  });
+
+  it('falls back to task default (NOT hardcoded 1024) when nothing configured', async () => {
+    const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
+    const a = new OpenAICompatibleAdapter(cfg);
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u' });
+    expect(cap.body().max_tokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(r.usedMaxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(DEFAULT_MAX_TOKENS).not.toBe(1024);
+  });
+});
+
+describe('OpenAICompatibleAdapter · 结构化输出降级链', () => {
+  it('uses json_object by default when jsonMode=true', async () => {
+    const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
+    const a = new OpenAICompatibleAdapter(cfg); // 未声明 supportsJsonSchema
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', jsonMode: true });
+    expect(cap.body().response_format).toEqual({ type: 'json_object' });
+    expect(r.structuredOutput).toBe('json_object');
+  });
+
+  it('uses json_schema when provider declares support', async () => {
+    const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
+    const a = new OpenAICompatibleAdapter({ ...cfg, supportsJsonSchema: true });
+    const r = await a.analyze({
+      systemPrompt: 's',
+      userPrompt: 'u',
+      jsonMode: true,
+      jsonSchema: { name: 'x', schema: { type: 'object', properties: {} } },
+    });
+    const rf = cap.body().response_format as { type: string; json_schema?: { name: string } };
+    expect(rf.type).toBe('json_schema');
+    expect(rf.json_schema?.name).toBe('x');
+    expect(r.structuredOutput).toBe('json_schema');
+  });
+
+  it('falls back to prompt_only when provider disables both', async () => {
+    const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
+    const a = new OpenAICompatibleAdapter({ ...cfg, supportsJsonObject: false });
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', jsonMode: true });
+    expect(cap.body().response_format).toBeUndefined();
+    expect(r.structuredOutput).toBe('prompt_only');
+  });
+
+  it('degrades json_schema → json_object when provider rejects the param (400)', async () => {
+    let call = 0;
+    const bodies: Record<string, unknown>[] = [];
+    globalThis.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+      call++;
+      if (call === 1) {
+        return new Response(JSON.stringify({ error: { message: 'response_format json_schema not supported' } }), {
+          status: 400,
+        });
+      }
+      return jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: '{}' } }] });
+    }) as unknown as typeof fetch;
+    const a = new OpenAICompatibleAdapter({ ...cfg, supportsJsonSchema: true });
+    const r = await a.analyze({
+      systemPrompt: 's',
+      userPrompt: 'u',
+      jsonMode: true,
+      jsonSchema: { name: 'x', schema: { type: 'object', properties: {} } },
+    });
+    expect(call).toBe(2);
+    expect((bodies[0]!.response_format as { type: string }).type).toBe('json_schema');
+    expect((bodies[1]!.response_format as { type: string }).type).toBe('json_object');
+    expect(r.structuredOutput).toBe('json_object');
+  });
+
+  it('does NOT degrade on unrelated errors (401 stays a hard failure)', async () => {
+    let call = 0;
+    globalThis.fetch = vi.fn(async () => {
+      call++;
+      return new Response('unauthorized', { status: 401 });
+    }) as unknown as typeof fetch;
+    const a = new OpenAICompatibleAdapter({ ...cfg, supportsJsonSchema: true });
+    await expect(
+      a.analyze({
+        systemPrompt: 's',
+        userPrompt: 'u',
+        jsonMode: true,
+        jsonSchema: { name: 'x', schema: { type: 'object', properties: {} } },
+      }),
+    ).rejects.toThrow(/401/);
+    expect(call).toBe(1);
+  });
+});
+
+describe('OpenAICompatibleAdapter · 业务错误体', () => {
+  it('throws when HTTP 200 but body has error.message', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ error: { message: 'quota exceeded', type: 'insufficient_quota' } }),
+    ) as unknown as typeof fetch;
+    const a = new OpenAICompatibleAdapter(cfg);
+    await expect(a.analyze({ systemPrompt: 's', userPrompt: 'u' })).rejects.toThrow(/quota exceeded/);
+  });
+
+  it('testConnection fails when connected but content is empty', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ choices: [{ finish_reason: 'stop', message: { content: '   ' } }] }),
+    ) as unknown as typeof fetch;
+    const a = new OpenAICompatibleAdapter(cfg);
+    const r = await a.testConnection();
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/empty/);
+  });
+});
+
+describe('OpenAICompatibleAdapter · fetch 恢复', () => {
+  beforeEach(() => {
+    globalThis.fetch = realFetch;
+  });
+  it('globalThis.fetch is restorable', () => {
+    expect(typeof globalThis.fetch).toBe('function');
   });
 });

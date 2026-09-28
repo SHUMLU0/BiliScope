@@ -1,7 +1,44 @@
-# BiliScope V0.2 进度表
+# BiliScope V3.0 进度表
 
 > 唯一进度表（Single Source of Truth）。
 > 状态：✅ 完成 / 🔄 进行中 / ⏸ 阻塞 / ⬜ 未开始
+
+---
+
+## V3.0.0 「可验证 AI 分析系统」
+
+> 定位：**不是重写**，在已验证的 V0.2.2 采集底座之上**重建 AI 层**。
+> 目标：AI 输出必须是**可验证的数据**，禁止把 `JSON.parse(text)` 成功当作分析成功。
+> 触发缺陷：AI 分析页显示 `AI 分析结果 "{\n"` —— `max_tokens=1024` 截断 + `parsed=undefined` 后 UI 回退用 `response.text` 当结果。
+
+| 编号 | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **S2** | `src/ai/schemas.ts`（新）统一领域契约 | ✅ | `CommentAIResult` 10 字段（summary/facts/findings/themes/support/opposition/needs/questions/uncertainty/nextResearch）；`Finding`/`CitedClaim`/`Theme`；`DOMAIN_SCHEMAS` 一处定义、全 Provider 共用 |
+| **S2-b** | 结构签名 + `superRefine` 反「幽灵成功」 | ✅ | `DOMAIN_SHAPE_KEYS` 前置校验（必须含领域骨架字段）+ `superRefine`（不得全空、必须有领域信号）→ 无关 JSON 判 `OUTPUT_SCHEMA_INVALID` |
+| **S3** | `src/ai/failures.ts`（新）分层失败 | ✅ | `REQUEST_FAILED / OUTPUT_EMPTY / OUTPUT_TRUNCATED / OUTPUT_INVALID_JSON / OUTPUT_SCHEMA_INVALID / OUTPUT_REFUSAL / NO_PROVIDER / SUCCESS`；`describeFailure()` 逐码中文说明；`isTruncatedFinish` / `isRefusalFinish` |
+| **S3-b** | `src/ai/types.ts` 诊断字段 | ✅ | `AnalyzeResponse` 新增 `finishReason?/finishMessage?/responseId?/modelVersion?/rawText?/parseError?/refusal?/structuredOutput?/usedMaxTokens?` |
+| **S3-c** | OpenAI adapter | ✅ | 捕获 `finish_reason`/`id`/`model`/`refusal`；`rawText`/`parseError` **不回填**；降级链 `json_schema → json_object`；`resolveMaxTokens()` 三级优先级 |
+| **S3-d** | Gemini adapter | ✅ | `toGeminiSchema()` 去 `additionalProperties`/`$schema`、类型大小写归一；捕获 `finishReason`/`finishMessage`/`promptFeedback.blockReason`/`responseId`/`modelVersion`；schema 不支持时降级 |
+| **S3-e** | `src/ai/json-schema.ts`（新） | ✅ | `zodToJsonSchema` / `zodToStrictJsonSchema`（`required` 全填 + `additionalProperties:false`）；`unwrap()` 处理 Optional/Nullable/Default |
+| **S3-f** | Provider 不错配 | ✅ | `getProviderConfig(name)` + `resolveProviderConfig(explicit?)`；修复旧 `buildAdapter({...cfg, name})` 只换名字导致「发到 A 端点却标称 B」 |
+| **S4** | `max_tokens` 与截断 | ✅ | `TASK_DEFAULT_MAX_TOKENS = { comment: 4096, creator/video/idea: 2048 }`；优先级 `request → provider → 任务默认`；`OUTPUT_TRUNCATED` **默认不修复**，提示真实上限 |
+| **S5** | `src/ai/orchestrator.ts`（新）统一编排 | ✅ | prepare → prompt → provider → request → parse → Zod → **一次**自动修复 → 审计落库 → 领域落库 → 强类型返回；UI 禁止消费 `unknown` |
+| **S6** | 分层失败 UI 呈现 | ✅ | `AIFailureNotice` 显示真实 `code` + 中文原因 + 技术细节折叠 + 是否可重试；不再一律「AI 失败」 |
+| **S7** | 自动修复上限 | ✅ | **总请求 ≤ 2**；仅无效 JSON / schema 不符可修复；修复 prompt 只允许「改写成指定 schema，不添加新的事实」；`finishReason=MAX_TOKENS` 不修复 |
+| **S8** | CommentAnalysis 正式接入 | ✅ | `comments → prepareCommentAnalysis → AI → CommentAIResult Zod → mapToCommentAnalysis → commentAnalysisRepo.add()`；`AIAnalysis`=审计 / `CommentAnalysis`=产品结果 |
+| **S9** | 评论 prompt 重写 | ✅ | 删除 `SCHEMA_NOTE` 冲突；`COMMENT_SCHEMA_TEXT` 与 Zod 逐字对应；`COMMENT_FORBIDDEN`（大多数用户都…/用户普遍…/观众一定…/这个视频导致…/词频≠因果） |
+| **S10** | 评论 AI UI | ✅ | `CommentAIReport` 9 分区（核心结论/客观事实/主题/支持观点/质疑反对/用户需求/争议情绪/不确定性/下一步研究）；rpid 可点击定位本地评论；底部 `查看原始 AI 输出` 折叠审计 |
+| **S11** | AI 历史页 | ✅ | `ai-history.html` + `pages/ai-history-page.tsx`：时间/类型/Provider·模型/状态/finishReason/解析/tokens/耗时；可展开 systemPrompt/userPrompt/rawResponse/parsedResult；`Nav` 新增入口 |
+| **T** | 测试 | ✅ | `schemas`(16) / `failures`(9) / `gemini-adapter`(10) / `orchestrator`(21)；重写 `openai-adapter`(18) / `prompts`(15)；**全仓 324 passed / 1 skipped / 0 failed（32 files）** |
+| **A** | 验收脚本 | ✅ | TEST 008/009 从「断言式 PASS」升级为真实 V3.0 断言：orchestrate SUCCESS + `max_tokens≥4096` + CommentAnalysis/AIAnalysis 各 1 条；截断不修复、无效 JSON 修复 1 次、无关 JSON 被拒、失败零落库 |
+| **G** | 门禁 | ✅ | typecheck 0 error / lint 0 error(9 warning 均为 `scripts/` 的 `no-console`) / test 324 passed / build 4.66s / scan-secrets 无泄漏 / verify-acceptance TEST 001-009 全 PASS |
+
+### 关键决策记录
+
+- **唯一真相**：`CommentAIResult` 定义在 `src/ai/schemas.ts` 一处，prompt 文本、JSON Schema、Zod 校验三者同源，禁止第二套。
+- **反幽灵成功**：`.default([])` + `required` 全填会让无关 JSON 变成「全空成功」，故必须加结构签名前置校验。这是本次迭代发现的**真实产品缺陷**，由 `orchestrator` 测试暴露。
+- **截断不修复**：截断是「输出上限不足」而非「格式错误」，修复只会再次截断，必须如实告知用户提高上限或减少样本。
+- **失败零落库**：只有 `SUCCESS` 才写 `CommentAnalysis`；失败仅留 `AIAnalysis` 审计记录。
 
 ---
 

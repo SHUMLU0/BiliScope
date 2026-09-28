@@ -83,7 +83,8 @@ describe('buildCommentAnalyzePrompt (V0.2 · P0-F)', () => {
       factsJson: serializeCommentFacts(input),
     });
     expect(system).toMatch(/rpid/);
-    expect(system).toMatch(/不得编造数字/);
+    // V3.0：反编造约束统一为「禁止编造数字 / 不得编造数字」两种等价措辞
+    expect(system).toMatch(/不得编造数字|禁止编造数字/);
     const parsed = JSON.parse(user) as { facts: unknown; sample: Array<{ rpid: string }> };
     expect(parsed.facts).toBeTruthy();
     expect(parsed.sample[0]!.rpid).toBe('7');

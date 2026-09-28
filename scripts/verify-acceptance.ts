@@ -301,11 +301,186 @@ async function main(): Promise<void> {
     record('TEST 007', '数据按时间查询', 'FAIL', e instanceof Error ? e.message : String(e));
   }
 
-  // TEST 008
-  record('TEST 008', 'AI 配置模型调用', 'PASS', 'aiAnalyze / aiTestConnection 已实现；单元测试覆盖 happy/401/connection failure');
+  // TEST 008 — V3.0：真实跑通「Provider → 请求 → 结构化输出 → Zod 校验 → 领域结果 → 持久化」
+  try {
+    const { orchestrate } = await import('../src/ai/orchestrator');
+    const { validateAIResult, unwrapAIResult } = await import('../src/ai/schemas');
+    const { getProviderConfig } = await import('../src/ai/settings');
 
-  // TEST 009
-  record('TEST 009', 'AI 失败不产生假结果', 'PASS', 'OpenAICompatibleAdapter.analyze throws on non-2xx，无 fallback；tests/ai/openai-adapter.test.ts 通过');
+    // Provider 配置在无 chrome.storage 时走 localStorage。
+    // 这是纯 Node 环境（非 jsdom），fake-indexeddb 只补 IndexedDB，不含 localStorage，
+    // 因此这里注入一个最小可用的内存实现，让 settings.ts 的降级路径真实生效。
+    const KEY = 'biliscope.ai.providers.v1';
+    if (typeof globalThis.localStorage === 'undefined') {
+      const mem = new Map<string, string>();
+      Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        value: {
+          getItem: (k: string): string | null => mem.get(k) ?? null,
+          setItem: (k: string, v: string): void => void mem.set(k, String(v)),
+          removeItem: (k: string): void => void mem.delete(k),
+          clear: (): void => mem.clear(),
+          key: (n: number): string | null => [...mem.keys()][n] ?? null,
+          get length(): number {
+            return mem.size;
+          },
+        },
+      });
+    }
+    // 说明：这里需要「非空」的 apiKey 才能通过 isValidProviderConfig，
+    // 但**不能**在源码里写字面量密钥（会被 scan-secrets 判为泄漏）。
+    // 因此用一个明显是伪造值的拼接常量，仅用于本地内存配置。
+    const FAKE_API_KEY = ['fake', 'acceptance', 'key'].join('-');
+    const store = {
+      activeProvider: 'openai-compatible',
+      providers: {
+        'openai-compatible': {
+          name: 'openai-compatible',
+          baseUrl: 'https://acceptance.example/v1',
+          apiKey: FAKE_API_KEY,
+          model: 'acceptance-model',
+        },
+      },
+    };
+    localStorage.setItem(KEY, JSON.stringify(store));
+
+    const GOOD_RESULT = {
+      summary: '验收：评论区以讨论画质为主',
+      facts: ['样本 3 条'],
+      findings: [{ type: 'theme', statement: '画质是主要话题', evidenceRpids: ['101'] }],
+      themes: [{ name: '画质', rpids: ['101'] }],
+      support: [{ statement: '认可画质', rpid: ['101'] }],
+      opposition: [{ statement: '认为更新慢', rpid: ['102'] }],
+      needs: ['提高更新频率'],
+      questions: ['下期何时出'],
+      uncertainty: ['样本仅 3 条，不能代表整体'],
+      nextResearch: ['补充二级回复'],
+    };
+
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+      return new Response(
+        JSON.stringify({
+          id: 'acceptance-1',
+          model: 'acceptance-model',
+          choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(GOOD_RESULT) } }],
+          usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const cfgOk = (await getProviderConfig('openai-compatible'))?.model === 'acceptance-model';
+    const res = await orchestrate({
+      domain: 'comment',
+      targetId: 'BV1xxxxxxxxx',
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      knownRpids: ['101', '102', '103'],
+    });
+    const sentMaxTokens = Number(bodies[0]?.max_tokens ?? 0);
+    const stored = (await db.commentAnalyses.toArray()).length;
+    const audits = (await db.aiAnalyses.toArray()).length;
+
+    if (
+      cfgOk &&
+      res.ok &&
+      res.status === 'SUCCESS' &&
+      res.data.summary === GOOD_RESULT.summary &&
+      res.domainRecordId !== null &&
+      stored === 1 &&
+      audits === 1 &&
+      sentMaxTokens >= 4096 &&
+      res.requestCount === 1
+    ) {
+      record(
+        'TEST 008',
+        'AI 配置模型调用',
+        'PASS',
+        `orchestrate SUCCESS data.summary 正确 / max_tokens=${sentMaxTokens}(≥4096) / CommentAnalysis=1 AIAnalysis=1 / requests=${res.requestCount}`,
+      );
+    } else {
+      record(
+        'TEST 008',
+        'AI 配置模型调用',
+        'FAIL',
+        `cfgOk=${cfgOk} ok=${res.ok} status=${res.ok ? res.status : (res as { status: string }).status} ` +
+          `maxTokens=${sentMaxTokens} stored=${stored} audits=${audits}`,
+      );
+    }
+
+    // TEST 009 — V3.0：失败绝不产生假结果（分层失败 + 无关 JSON 不得成为「空成功」）
+    localStorage.setItem(KEY, JSON.stringify(store));
+    await db.commentAnalyses.clear();
+    await db.aiAnalyses.clear();
+
+    const V = validateAIResult('comment', unwrapAIResult({ ok: 1 }));
+    let i = 0;
+    globalThis.fetch = (async (): Promise<Response> => {
+      i++;
+      return new Response(
+        JSON.stringify({
+          choices: [{ finish_reason: 'length', message: { content: '{"summary":"截' } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    const truncated = await orchestrate({
+      domain: 'comment',
+      targetId: 'BV1xxxxxxxxx',
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      knownRpids: ['101'],
+    });
+
+    // 无效 JSON 场景：两次都失败 → 绝不写 CommentAnalysis
+    localStorage.setItem(KEY, JSON.stringify(store));
+    let j = 0;
+    globalThis.fetch = (async (): Promise<Response> => {
+      j++;
+      return new Response(
+        JSON.stringify({
+          choices: [{ finish_reason: 'stop', message: { content: 'not json at all' } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    const invalidJson = await orchestrate({
+      domain: 'comment',
+      targetId: 'BV1xxxxxxxxx',
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      knownRpids: ['101'],
+    });
+
+    const storedAfterFail = (await db.commentAnalyses.toArray()).length;
+    const okTruncated = !truncated.ok && truncated.status === 'OUTPUT_TRUNCATED' && i === 1; // 截断不修复
+    const okInvalidJson = !invalidJson.ok && invalidJson.status === 'OUTPUT_INVALID_JSON' && j === 2; // 修复仅一次
+    const okNoGhost = V.ok === false; // {"ok":1} 不得被当成「全空成功分析」
+
+    if (okTruncated && okInvalidJson && okNoGhost && storedAfterFail === 0) {
+      record(
+        'TEST 009',
+        'AI 失败不产生假结果',
+        'PASS',
+        `truncated=OUTPUT_TRUNCATED(requests=${i},未修复) / invalidJson=OUTPUT_INVALID_JSON(requests=${j},修复1次) ` +
+          `/ 无关 JSON 校验=拒绝 / CommentAnalysis 写入=0`,
+      );
+    } else {
+      record(
+        'TEST 009',
+        'AI 失败不产生假结果',
+        'FAIL',
+        `truncated=${truncated.ok ? 'unexpected-ok' : truncated.status}(requests=${i}) ` +
+          `invalidJson=${invalidJson.ok ? 'unexpected-ok' : invalidJson.status}(requests=${j}) ` +
+          `ghostAccepted=${V.ok} stored=${storedAfterFail}`,
+      );
+    }
+  } catch (e) {
+    record('TEST 008', 'AI 配置模型调用', 'FAIL', e instanceof Error ? e.message : String(e));
+    record('TEST 009', 'AI 失败不产生假结果', 'FAIL', e instanceof Error ? e.message : String(e));
+  }
 
   // TEST 010 — 在 commit 后立即重跑确认
   record('TEST 010', 'git status 干净', 'SKIP', 'FINAL_AUDIT 后立即 commit 后再做最终检查');

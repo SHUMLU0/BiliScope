@@ -36,6 +36,7 @@ export default defineConfig({
         'pages/my': resolve(__dirname, 'src/ui/pages/my.html'),
         'pages/hot': resolve(__dirname, 'src/ui/pages/hot.html'),
         'pages/idea': resolve(__dirname, 'src/ui/pages/idea.html'),
+        'pages/ai-history': resolve(__dirname, 'src/ui/pages/ai-history.html'),
         'pages/tasks': resolve(__dirname, 'src/ui/pages/tasks.html'),
         background: resolve(__dirname, 'src/background/index.ts'),
         content: resolve(__dirname, 'src/content/index.ts'),

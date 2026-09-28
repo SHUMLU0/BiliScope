@@ -2,6 +2,55 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/) 规范。
 
+## [V3.0.0] - 2026-09-28
+
+**「可验证 AI 分析系统」**：不是重写，而是在已验证的 V0.2.2 采集底座之上**重建 AI 层**。
+定位从「AI 能返回一段 JSON」升级为「AI 输出必须是**可验证的数据**」。
+
+### 修复的真实缺陷（用户点名 9 项）
+
+| # | 缺陷 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | AI 分析页出现 `AI 分析结果 "{\n"` | `max_tokens` 默认仅 1024 → 输出截断；`JSON.parse` 失败后 `parsed=undefined`，UI 回退用 `response.text` 当结果显示 | 任务级默认上限（评论 4096）+ 分层失败码，截断不再被当作结果展示 |
+| 2 | 截断无从判断 | OpenAI adapter 未保存 `finish_reason` | `AnalyzeResponse` 新增 `finishReason/finishMessage/responseId/modelVersion/rawText/parseError/refusal` 全量上报 |
+| 3 | 截断无从判断（Gemini） | Gemini adapter 未保存 `finishReason/finishMessage` | 捕获 `finishReason`/`finishMessage`/`promptFeedback.blockReason`/`responseId`/`modelVersion` |
+| 4 | `JSON.parse` 成功 ≠ 符合业务 schema | 没有领域校验 | 新增 `schemas.ts`（Zod 领域契约）+ 两级校验（结构签名 + Zod 语义） |
+| 5 | `SCHEMA_NOTE` 与评论 prompt 的 `support/opposition` 要求冲突 | prompt 内存在两套 schema 描述 | 删除冲突描述，`COMMENT_SCHEMA_TEXT` 与 Zod 逐字对应，**一处定义** |
+| 6 | `CommentAnalysis` 从不落库（死代码） | 没有领域投影 | `mapToCommentAnalysis()` + orchestrator 在 SUCCESS 时落库 |
+| 7 | UI 主要用 `<pre>` 转储 JSON | 页面直接消费 `unknown` | 新增 `CommentAIReport`，9 个固定分区 |
+| 8 | Provider 覆盖只换 `adapter.name` | `buildAdapter({...cfg, name})` 导致「发到 A 端点却标称 B」 | 新增 `getProviderConfig(name)` / `resolveProviderConfig()`，按名读真实 baseUrl/apiKey/model，错配即报错 |
+| 9 | AI 测试只证明「能返回 JSON」 | 测试断言过弱 | 新增 `schemas`/`failures`/`gemini-adapter`/`orchestrator` 测试；重写 `openai-adapter`/`prompts` 测试 |
+
+### Added
+
+- `src/ai/schemas.ts` —— 统一 AI 结果契约（`CommentAIResult` 10 字段 / `GeneralAIResult`；一个领域一份 schema，一处定义，全 Provider 共用）
+- `src/ai/failures.ts` —— 分层失败码 `REQUEST_FAILED / OUTPUT_EMPTY / OUTPUT_TRUNCATED / OUTPUT_INVALID_JSON / OUTPUT_SCHEMA_INVALID / OUTPUT_REFUSAL / NO_PROVIDER / SUCCESS`
+- `src/ai/json-schema.ts` —— `zodToJsonSchema` / `zodToStrictJsonSchema`（自动 `required` 全填 + `additionalProperties:false`）
+- `src/ai/orchestrator.ts` —— 统一编排：prepare → prompt → provider → request → parse → Zod → **一次**自动修复 → 审计落库 → 领域落库 → 强类型返回；含 `auditCitations()` 引用可验证性审计
+- `src/ui/components/CommentAIReport.tsx` —— 9 分区结构化报告 + `AIFailureNotice` 分层失败提示
+- `src/ui/pages/ai-history-page.tsx` / `ai-history.tsx` / `ai-history.html` —— AI 历史审计页（时间/类型/Provider·模型/状态/finishReason/解析/tokens/耗时，可展开原始 prompt 与响应）
+- 测试：`tests/ai/schemas.test.ts` / `failures.test.ts` / `gemini-adapter.test.ts` / `orchestrator.test.ts`；重写 `openai-adapter.test.ts` / `prompts.test.ts`
+
+### Changed
+
+- `AnalyzeRequest` 新增 `maxTokens?` / `structuredOutput?` / `jsonSchema?`；`ProviderConfig` 新增 `maxTokens?` / `supportsJsonSchema?` / `supportsJsonObject?`
+- `max_tokens` 三级优先级：`request.maxTokens` → `provider.maxTokens` → 任务默认值（评论 4096 / 其他 2048；连接测试 256）
+- 结构化输出降级链：`json_schema` → `json_object` → prompt 约束 + 本地 Zod（不假设所有 OpenAI 兼容服务支持同一组参数）
+- 评论 prompt 重写：删除 schema 冲突；禁止「大多数用户都…」「用户普遍…」「观众一定…」「这个视频导致…」；`nextResearch` 不得伪装成结论
+- `AIAnalysis` = **审计记录**（`__meta` 携带 finishReason / structuredOutput / parseOk / tokens 等）；`CommentAnalysis` = **产品结果**
+- 自动修复上限 = **2 次总请求**；仅「无效 JSON」与「schema 不符」可修复，`OUTPUT_TRUNCATED` 默认不修复
+- 版本号 `0.2.2` → `3.0.0`
+
+### Fixed
+
+- **「幽灵成功」**：`zodToStrictJsonSchema` 把字段全部 `required`，配合 Zod `.default([])` 会让 `{"ok":1}` 这类无关 JSON 被补全成「字段齐全、内容全空」的合法结果并判定成功。新增**结构签名前置校验**（必须含领域骨架字段）+ Zod `superRefine`（不得全空、必须有领域信号），二者不满足即 `OUTPUT_SCHEMA_INVALID` → 走唯一一次修复；修复仍不满足则如实失败，**绝不落 CommentAnalysis**。
+- 截断响应不再在 `JSON.parse` 失败后被回退成 raw text 展示。
+- Provider 名与端点静默错配。
+
+### Security
+
+- `scan-secrets.mjs` 通过（无密钥泄漏）；API Key 仅存在于 `chrome.storage.local` / `localStorage`，不进入源码 / 日志 / Git / 审计包。
+
 ## [Unreleased]
 
 ### Added

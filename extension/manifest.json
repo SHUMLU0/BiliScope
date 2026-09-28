@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BiliScope",
-  "version": "0.2.2",
+  "version": "3.0.0",
   "description": "Bilibili creator research + content ecosystem analysis. Local-only data, no auth, no cookies.",
   "minimum_chrome_version": "120",
   "action": {

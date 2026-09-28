@@ -1,12 +1,90 @@
-# FINAL_AUDIT.md — BiliScope V0.2.2 最终审计
+# FINAL_AUDIT.md — BiliScope V3.0.0 最终审计
 
-> 生成于 2026-09-28 · 当前版本 **V0.2.2**（裸 BV 评论采集依赖闭环修复：`ensureVideoByBvid` bootstrap）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-28 · 当前版本 **V3.0.0**（「可验证 AI 分析系统」：AI 输出必须是可验证的数据）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
 >
-> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → **V0.2.2 裸 BV 评论采集依赖闭环修复**
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → **V3.0.0 可验证 AI 分析系统**
 
 ---
 
-## 0-septies. V0.2.2 裸 BV 评论采集依赖闭环修复（P0 依赖前置）
+## 0-nonies. V3.0.0 可验证 AI 分析系统
+
+> 定位：**不是重写**。保留已验证的 V0.2.2 采集底座（Collector / Normalizer / Repository / 分页不变量 / WBI），**只重建 AI 层**：
+> `Provider → 请求 → 结构化输出 → Zod 校验 → 领域结果 → 持久化 → UI → 诊断 → 测试`。
+> 触发缺陷：AI 分析页显示 `AI 分析结果 "{\n"`。
+
+### 根因链（已确认，不再重复调查）
+
+```
+AI 请求成功（HTTP 200）
+  → model 因 max_tokens=1024 被截断，返回不完整 JSON
+  → JSON.parse 失败 → parsed = undefined
+  → UI 回退使用 response.text（残缺 raw text）
+  → 把「半截 JSON」当作正常分析结果展示
+```
+
+**表层是 token 不够，深层是「没有领域契约、没有分层失败、UI 消费 unknown」。**
+
+### 修复清单（用户点名 9 项问题 → 逐项落地）
+
+| # | 问题 | 修复位置 | 验证 |
+|---|---|---|---|
+| 1 | `max_tokens` 默认仅 1024 → 截断 | `TASK_DEFAULT_MAX_TOKENS`（comment 4096）+ 三级优先级 `request → provider → 任务默认` | `orchestrator.test.ts`「honours the comment-domain token default（>=4096）」；验收 TEST 008 断言 `max_tokens=4096` |
+| 2 | OpenAI adapter 未存 `finish_reason` | `openai-adapter.ts` 捕获 `finish_reason`/`id`/`model`/`refusal`/`rawText`/`parseError` | `openai-adapter.test.ts`（18） |
+| 3 | Gemini adapter 未存 `finishReason`/`finishMessage` | `gemini-adapter.ts` 捕获 `finishReason`/`finishMessage`/`promptFeedback.blockReason`/`responseId`/`modelVersion` | `gemini-adapter.test.ts`（10） |
+| 4 | `JSON.parse` 成功 ≠ 符合业务 schema | `schemas.ts` 两级校验：**结构签名** + **Zod 语义** | `schemas.test.ts`（16） |
+| 5 | `SCHEMA_NOTE` 与 `support/opposition` 要求冲突 | 删除冲突描述；`COMMENT_SCHEMA_TEXT` 与 Zod 逐字对应 | `prompts.test.ts`（15）断言无第二套 schema |
+| 6 | `CommentAnalysis` 从不落库（死代码） | `mapToCommentAnalysis()` + orchestrator SUCCESS 时 `commentAnalysisRepo.add()` | `orchestrator.test.ts` 断言 `db.commentAnalyses` 长度 1 |
+| 7 | UI 主要 `<pre>` 转储 JSON | `CommentAIReport.tsx` 9 固定分区 + `查看原始 AI 输出` 折叠 | 验收 TEST 008 断言 `res.data.summary` 正确消费强类型结果 |
+| 8 | Provider 覆盖只换 `adapter.name` | `getProviderConfig(name)` + `resolveProviderConfig()`，按名读真实 baseUrl/apiKey/model | `orchestrator.test.ts`「routes to the explicitly requested provider endpoint AND credentials」 |
+| 9 | AI 测试只证明「能返回 JSON」 | 新增 4 个测试文件、重写 2 个，共 **93/93** AI 测试 | 全仓 324 passed |
+
+### 本次迭代发现的**真实产品缺陷**（诚实记录）
+
+> 由 `orchestrator.test.ts` 的「does NOT treat "valid JSON but not a domain result" as success」用例暴露。
+
+`zodToStrictJsonSchema()` 会把每个字段都变成 `required`（Structured Outputs 要求），而 Zod 的 `.default([])` / `.default('')` 允许字段缺失，
+两者叠加导致：**一个与业务毫无关系的合法 JSON（`{"ok":1}`）被补全成「字段齐全、内容全空」的合法结果，校验通过、判为成功、落库、UI 显示一片空白。**
+
+这是典型的「幽灵成功」——比崩溃更危险，因为它看起来是成功的。
+
+**修复**：
+1. `validateAIResult()` 增加**结构签名前置校验**（`DOMAIN_SHAPE_KEYS`）：值必须至少含一个该领域的骨架字段，否则 `OUTPUT_SCHEMA_INVALID`；
+2. `commentAIResultSchema.superRefine`：不得全空；`summary`/`facts` 至少有一个非空；领域字段至少一个非空；
+3. `generalAIResultSchema.superRefine`：不得全空。
+
+修复后 `{"ok":1}` → `OUTPUT_SCHEMA_INVALID` → 走**唯一一次**自动修复 → 修复成功则 SUCCESS，失败则如实报错且**零落库**。
+
+### 门禁结果（本地）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| 类型检查 | `tsc --noEmit` | ✅ 0 error |
+| Lint | `eslint . --ext .ts,.tsx` | ✅ 0 error（9 warning，均为 `scripts/` 的 `no-console`） |
+| 单元 / 集成测试 | `vitest run` | ✅ **32 files / 324 passed / 1 skipped / 0 failed** |
+| 生产构建 | `vite build` | ✅ built in 4.66s（含新增 `ai-history.html`） |
+| 密钥扫描 | `scan-secrets.mjs` | ✅ no secrets detected |
+| 自动验收 | `verify-acceptance` | ✅ TEST 001-009 全 PASS（010/011 延后） |
+
+### 验证等级（诚实标注，禁止混淆）
+
+| 等级 | 状态 |
+|---|---|
+| Unit PASS | ✅ |
+| Integration PASS | ✅（orchestrate 全链路：provider 解析 → 真实请求形状 → 解析 → Zod → 落库） |
+| Real API PASS | ❌ 未执行（沙盒无真实 Provider Key） |
+| Real API ENVIRONMENT LIMITED | ⚠️ 适用（无 Key = 环境受限，**不宣称 Real API PASS**） |
+| Chrome E2E PASS | ⚠️ `CHROME_E2E_ENV_LIMITED`（本机 `--load-extension` 不加载解包扩展，与 V0.2.2 结论一致） |
+
+### 剩余限制
+
+1. **无真实 Provider Key** → 无法声明 Real API PASS。`orchestrate` 的真实请求形状（端点 / Authorization / `max_tokens` / `response_format`）已在测试中断言，但未打通真实供应商。
+2. **情绪分布**：结构化输出未提供情绪计数，故 `sentimentResult` 记 0 并在 `uncertaintyNote` 显式说明「未由结构化输出提供」——**不编造**。
+3. **Chrome E2E**：环境受限，未取得真实浏览器端到端证据。
+4. **`factsJson` 一致性**：prompt 要求 `facts` 必须与事实块一致，但**未做程序化数字比对**（只落到「模型须遵守」+ 引用审计）。列入后续增强。
+
+---
+
+## 0-octies. V0.2.2 裸 BV 评论采集依赖闭环修复（P0 依赖前置）
 
 > 触发：真实 Chrome 在评论页直接输入一个**本地从未采过**的合法 BV（`BV1D9aA61E6v`）→ 报 `采集失败：video not found for bvid=BV1D9aA61E6v`。
 > 目标：让「裸 BV」自己补齐依赖（BV → Video → aid → 评论），**绝不用 mock 冒充真实成功**。

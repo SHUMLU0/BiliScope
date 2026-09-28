@@ -19,18 +19,32 @@ V0.1 只做：**采集 → 存储 → 查询 → 分析 → 提示**，AI 输出
 
 ---
 
-## 主要功能（V0.1）
+## 主要功能
 
 | Page | 名称 | 核心能力 |
 |---|---|---|
 | 1 | 账号研究 | UP 主概览、视频列表、历史趋势、客观自动标记 |
 | 2 | 全站雷达 | 50w+ UP 主搜索/筛选/排序（阶段化增量） |
-| 3 | 评论研究 | 主题/高频词/支持/反对/需求/情绪（强制 anti-词云幻觉） |
+| 3 | 评论研究 | 主题/高频词/支持/反对/需求/情绪（强制 anti-词云幻觉）+ **AI 分析报告（9 分区）** |
 | 4 | 我的数据 | 手动输入 UID，查看自有视频 + 多时间点 snapshot |
 | 5 | 热点雷达 | 公开热门 / 排行 / 搜索趋势（不含规避监管建议） |
 | 6 | 灵感 & 选题 | 一句话保存、状态机：`idea → researching → ready → producing → published → verified / discarded` |
+| 7 | **AI 历史** | 每次 AI 请求的审计记录：Provider·模型 / 状态 / finishReason / 解析结果 / tokens / 耗时，可展开原始 prompt 与响应 |
 
-AI 配套：账号分析 / 评论分析 / 视频研究 三类（OpenAI-compatible / DeepSeek / Custom）。
+AI 配套：账号分析 / 评论分析 / 视频研究 三类（OpenAI-compatible / DeepSeek / Gemini / Custom）。
+
+---
+
+## V3.0「可验证 AI 分析系统」
+
+> **AI 输出必须是可验证的数据，不是一段字符串。**
+
+- **统一领域契约**：`src/ai/schemas.ts` 一处定义，prompt 文本 / JSON Schema / Zod 校验三者同源；全部 Provider 共用。
+- **分层失败**：区分 `REQUEST_FAILED / OUTPUT_EMPTY / OUTPUT_TRUNCATED / OUTPUT_INVALID_JSON / OUTPUT_SCHEMA_INVALID / OUTPUT_REFUSAL / NO_PROVIDER`，UI 显示**真实原因**，不再一律「AI 失败」。
+- **最多 2 次请求**：第 2 次仅对「无效 JSON / schema 不符」做一次修复（只改结构，不重新分析）；截断**不修复**，如实告知输出上限不足。
+- **引用可验证**：`support` / `opposition` 每条论断必须带真实 `rpid`，点击可定位到本地评论；无引用论断显式标注 `[无引用]`。
+- **失败零落库**：只有 `SUCCESS` 才写 `CommentAnalysis`（产品结果）；`AIAnalysis` 只作审计。
+- **反「幽灵成功」**：无关 JSON（如 `{"ok":1}`）不会被补全成「全空成功分析」，一律判 `OUTPUT_SCHEMA_INVALID`。
 
 ---
 

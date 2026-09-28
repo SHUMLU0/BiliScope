@@ -94,6 +94,33 @@ export function OptionsApp() {
           <span className="muted">Model</span>
           <input value={cfg.model ?? ''} onChange={(e) => updateCfg({ model: e.target.value })} />
         </label>
+        {/* V3.0 · 第四节：Provider 级输出上限（留空则使用任务默认值：评论 4096 / 其他 2048） */}
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="muted">输出上限 max_tokens（留空 = 任务默认：评论 4096 / 其他 2048）</span>
+          <input
+            type="number"
+            min={256}
+            step={256}
+            value={cfg.maxTokens ?? ''}
+            placeholder="默认"
+            onChange={(e) => {
+              const v = e.target.value.trim();
+              updateCfg({ maxTokens: v === '' ? undefined : Math.max(256, Number(v) || 0) });
+            }}
+          />
+        </label>
+        {/* V3.0 · 第三节：Structured Outputs 能力声明（默认关闭 = 不发 json_schema 参数） */}
+        <label className="row" style={{ gap: 8, alignItems: 'center' }}>
+          <input
+            type="checkbox"
+            style={{ width: 'auto' }}
+            checked={cfg.supportsJsonSchema === true}
+            onChange={(e) => updateCfg({ supportsJsonSchema: e.target.checked })}
+          />
+          <span className="muted">
+            该 Provider 支持 Structured Outputs（`response_format: json_schema`）— 不确定请留空，将降级为 JSON mode
+          </span>
+        </label>
         <div className="row">
           <button onClick={handleSave} disabled={saving}>
             {saving ? '保存中…' : '保存'}

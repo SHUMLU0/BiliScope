@@ -1,20 +1,79 @@
 /**
- * 三类 AI 分析 prompt 模板。
- * 全部强制要求输出 facts / explanations / uncertainty 三段。
+ * AI 分析 prompt 模板（V3.0 重写）。
+ *
+ * ⚠️ V3.0 修复的核心矛盾（第九节）：
+ *   旧 `SCHEMA_NOTE` 声明 `{facts, explanations, evidence, uncertainty, nextResearch}`，
+ *   而 `buildCommentAnalyzePrompt` 又额外要求 `support` / `opposition` 带 rpid ——
+ *   **同一个 system prompt 里塞了两套互相矛盾的 schema**，模型只能二选一或拼凑，
+ *   这就是「AI 返回残缺 JSON」的直接来源之一。
+ *
+ * 现在：
+ *  - 每个领域**只声明一套 schema**，且与 `src/ai/schemas.ts` 的 Zod 定义逐字对应。
+ *  - schema 文本由 `describeSchema()` 从字段常量生成，避免 prompt 与 Zod 漂移。
+ *  - 评论 prompt 只负责「约束」，不再自行发明字段。
  */
 
 import type { Creator, CreatorSnapshot, Video, VideoSnapshot } from '@models/index';
 import type { Comment } from '@models/comment';
 
-const SCHEMA_NOTE = `
-你必须严格输出 JSON，对象结构：
+/**
+ * 评论分析 schema 的 prompt 表述。
+ * 字段清单必须与 `commentAIResultSchema` 一致（见 tests/ai/schemas.test.ts 的一致性断言）。
+ */
+const COMMENT_SCHEMA_TEXT = `
+你必须**只**输出一个 JSON 对象，结构如下（不得增删顶层字段名）：
 {
-  "facts": string[],         // 客观事实（数字、行为、时间），不含解释
-  "explanations": string[],  // 可能解释（"可能"/"推测"前缀），含证据字段
-  "evidence": { [key: string]: string }, // 每个解释引用的数据点
-  "uncertainty": string[],   // 不确定性与数据缺失说明
-  "nextResearch": string[]   // 下一步要查什么
-}`;
+  "summary": string,            // 核心结论，一句话；不得引入下方未出现的新事实
+  "facts": string[],            // 客观事实：只能来自给定的「客观统计事实」块或样本原文
+  "findings": [                 // 你的**解释性**判断
+    {
+      "type": "theme" | "painpoint" | "emotion" | "controversy" | "behavior",
+      "statement": string,      // 一句可独立阅读的判断
+      "evidenceRpids": string[] // 支撑该判断的原始评论 rpid；没有证据就写 []
+    }
+  ],
+  "themes": [                   // 评论中反复出现的主题
+    { "name": string, "rpids": string[] }   // rpids = 对应主题的评论 rpid
+  ],
+  "support": [                  // 支持 / 正面观点
+    { "statement": string, "rpid": string[] }   // 必须引用真实 rpid
+  ],
+  "opposition": [               // 质疑 / 反对观点
+    { "statement": string, "rpid": string[] }   // 必须引用真实 rpid
+  ],
+  "needs": string[],            // 用户需求（要说明依据了哪些评论样本）
+  "questions": string[],        // 高频问题
+  "uncertainty": string[],      // 不确定性：必须写明样本量 / 清洗影响 / 抽样偏差 / 数据完整性
+  "nextResearch": string[]      // 下一步该采集什么数据（不得写成结论）
+}
+`;
+
+/** 创作者 / 视频领域 schema 的 prompt 表述（与 generalAIResultSchema 一致） */
+const GENERAL_SCHEMA_TEXT = `
+你必须**只**输出一个 JSON 对象，结构如下（不得增删顶层字段名）：
+{
+  "summary": string,
+  "facts": string[],          // 客观事实：只能来自给定数据，数字必须能在输入里找到
+  "explanations": string[],   // 解释（"可能"/"推测" 前缀），区分相关性 ≠ 因果
+  "uncertainty": string[],    // 不确定性与数据缺失说明
+  "nextResearch": string[]    // 下一步要查什么数据
+}
+`;
+
+/** 反幻觉硬约束（所有领域共用） */
+const ANTI_FABRICATION = [
+  '禁止编造任何输入数据中没有的数字、比例、时间、排名。',
+  '拿不到的数据必须写进 uncertainty，不得用 0 或"大约"糊过去。',
+  '禁止把词频当成因果：出现次数多 ≠ 是原因。',
+];
+
+/** 评论领域专用禁用语（第九节明列） */
+const COMMENT_FORBIDDEN = [
+  '禁止使用"大多数用户都…""用户普遍…""观众一定…""这个视频导致…"这类无证据的全称判断。',
+  '禁止在 support / opposition 中给出不带 rpid 引用的观点。',
+  '禁止从词频直接推导因果。',
+  '禁止在 nextResearch 里写结论——那里只能写"还需要采集什么数据"。',
+];
 
 export interface CreatorAnalyzeCtx {
   creator: Creator;
@@ -24,11 +83,11 @@ export interface CreatorAnalyzeCtx {
 
 export function buildCreatorAnalyzePrompt(ctx: CreatorAnalyzeCtx): { system: string; user: string } {
   const system = [
-    '你是一名严谨的 B 站内容数据分析师。只基于用户给定的结构化数据回答，禁止推测未给出的事实。',
-    '事实陈述必须来自原始数字。',
+    '你是一名严谨的 B 站内容数据分析师。只基于用户给定的结构化数据回答。',
+    '事实陈述必须来自原始数字；解释必须标注为推测。',
     '解释必须区分相关性 ≠ 因果。',
-    '必须分三段输出：facts / explanations / uncertainty。',
-    SCHEMA_NOTE,
+    ...ANTI_FABRICATION,
+    GENERAL_SCHEMA_TEXT,
   ].join('\n');
 
   const user = JSON.stringify(
@@ -75,7 +134,8 @@ export function buildVideoAnalyzePrompt(ctx: VideoAnalyzeCtx): { system: string;
     '你是一名 B 站单视频表现分析师。',
     '客观事实 / 推断 / 不确定性 必须分开；不要做爆款百分比预测。',
     '比较必须基于给定基线。',
-    SCHEMA_NOTE,
+    ...ANTI_FABRICATION,
+    GENERAL_SCHEMA_TEXT,
   ].join('\n');
 
   const user = JSON.stringify(
@@ -91,6 +151,7 @@ export function buildVideoAnalyzePrompt(ctx: VideoAnalyzeCtx): { system: string;
       snapshot: ctx.snapshot,
       baseline: ctx.recentCreatorAvg,
       commentSample: ctx.comments.slice(0, 100).map((c) => ({
+        rpid: c.rpidStr,
         uname: c.uname,
         content: c.content.slice(0, 200),
         like: c.like,
@@ -115,24 +176,36 @@ export interface CommentAnalyzeCtx {
 export function buildCommentAnalyzePrompt(ctx: CommentAnalyzeCtx): { system: string; user: string } {
   const requireCitations = ctx.requireCitations !== false;
   const system = [
-    '你是一名 B 站评论区研究分析师。',
+    '你是一名 B 站评论区研究分析师。你的输出会被程序用严格的结构校验，任何字段缺失或类型错误都会被判为失败。',
     '区分主题 / 高频问题 / 支持观点 / 反对观点 / 用户痛点 / 情绪 / 争议。',
-    '词频 ≠ 因果。',
-    '必须分三段输出：facts / explanations / uncertainty。',
+    'facts 段只能复述给定的「客观统计事实」块，禁止编造数字。',
     requireCitations
-      ? '支持 / 反对观点必须附带原始评论的 rpid（输出字段 support / opposition 的每项都带 "rpid" 引用），禁止凭空断言。'
+      ? 'support / opposition 的每一项都必须带 "rpid" 数组，rpid 只能取样本里真实出现过的值。'
       : '',
-    ctx.factsJson ? '系统会先给出「客观统计事实」块；你的 facts 段必须与该块一致，不得编造数字。' : '',
-    SCHEMA_NOTE,
+    ctx.factsJson ? '系统会先给出「客观统计事实」块；你输出的 facts 必须与该块一致。' : '',
+    ...COMMENT_FORBIDDEN,
+    ...ANTI_FABRICATION,
+    // ⚠️ 只声明一套 schema —— 与 src/ai/schemas.ts 逐字对应
+    COMMENT_SCHEMA_TEXT,
   ]
     .filter(Boolean)
     .join('\n');
+
+  // 惰性解析 factsJson：容错不抛（脏 facts 不应炸掉整条分析链路）
+  let facts: unknown = undefined;
+  if (ctx.factsJson) {
+    try {
+      facts = JSON.parse(ctx.factsJson);
+    } catch {
+      facts = undefined;
+    }
+  }
 
   const user = JSON.stringify(
     {
       videoId: ctx.videoId,
       // V0.2 · P0-F：事实块与样本块分开，明确「已算好的数字」vs「待解释的原文」
-      facts: ctx.factsJson ? JSON.parse(ctx.factsJson) : undefined,
+      facts,
       sample: ctx.comments.slice(0, 200).map((c) => ({
         rpid: c.rpidStr,
         uname: c.uname,
@@ -147,3 +220,38 @@ export function buildCommentAnalyzePrompt(ctx: CommentAnalyzeCtx): { system: str
 
   return { system, user };
 }
+
+/**
+ * V3.0 · 第七节：自动修复 prompt。
+ *
+ * 铁律：**只能要求模型「把已有结果改写成指定 schema」，不得重新分析数据、不得新增事实。**
+ */
+export function buildRepairPrompt(opts: {
+  domain: 'comment' | 'creator' | 'video' | 'idea';
+  previousRaw: string;
+  issues?: string[];
+}): { system: string; user: string } {
+  const schemaText = opts.domain === 'comment' ? COMMENT_SCHEMA_TEXT : GENERAL_SCHEMA_TEXT;
+  const system = [
+    '你是一个 JSON 结构修复器。',
+    '你的唯一任务：把用户提供的已有结果**改写成**指定 schema。',
+    '严禁重新分析数据，严禁添加任何新的观点、数字、事实或评论引用。',
+    '只允许：整理字段、把已有内容放进正确字段、补上空数组 []。',
+    '如果原结果里缺少某个必填字段且无法从原文得到，就填空字符串或空数组，绝不编造。',
+    schemaText,
+  ].join('\n');
+
+  const user = JSON.stringify(
+    {
+      instruction: '把下面已有结果修正为指定 schema，不添加新的事实。',
+      validationIssues: opts.issues ?? [],
+      previousResult: opts.previousRaw.slice(0, 12_000),
+    },
+    null,
+    2,
+  );
+
+  return { system, user };
+}
+
+export { COMMENT_SCHEMA_TEXT, GENERAL_SCHEMA_TEXT };

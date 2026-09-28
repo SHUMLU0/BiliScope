@@ -109,8 +109,58 @@ BV=其他BV node scripts/e2e-comment-bootstrap.mjs
 - 502 / 网络问题 → 重跑 workflow
 - 测试失败 → 本地 `pnpm test` 复现
 
-## 十、版本
+## 十、AI 分析（V3.0 起）
 
-当前：**v0.2.2**（**V0.2.2 裸 BV 评论采集依赖闭环修复：新增 `src/services/video-bootstrap.ts` 的 `ensureVideoByBvid()`，评论页可直接输入裸 BV——本地无记录时自动请求 `/x/web-interface/view` 补齐 Creator + Video 依赖，本地已有时 0 次额外请求；新增 `normalizeVideoDetail()`、UI 失败分类、bootstrap 测试 A–F 与真实 Chrome E2E 脚本**；承接 V0.2.1 评论采集真实性修复（`pagination_str` 协议 + 翻页不变量 + 跨页去重，`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
+AI 分析走统一编排：**Provider → 请求 → 结构化输出 → Zod 校验 → 领域结果 → 落库 → UI**。
 
-历史版本：v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。
+### 10.1 输出上限（`max_tokens`）
+
+不再「所有分析一律 1024」。优先级：**请求显式指定 → Provider 配置 → 任务默认值**。
+
+| 任务 | 默认上限 |
+|---|---|
+| 评论分析（comment） | 4096 |
+| 账号 / 视频 / 选题分析 | 2048 |
+| 连接测试 | 256 |
+
+若输出因上限被截断（`finishReason=length`），系统**不会**尝试自动修复，而是明确告知：
+
+> `AI 输出被截断（超出输出上限）…（本次上限 4096 tokens，建议提高或减少样本量）`
+
+### 10.2 失败原因分层（不再一律「AI 失败」）
+
+| 状态码 | 含义 | 会自动修复 |
+|---|---|---|
+| `REQUEST_FAILED` | 网络 / HTTP 非 2xx / 超时 | 否（可重试） |
+| `OUTPUT_EMPTY` | HTTP 200 但内容为空 | 否 |
+| `OUTPUT_TRUNCATED` | 输出被上限截断 | **否**（提高上限或减少样本） |
+| `OUTPUT_INVALID_JSON` | 返回的不是合法 JSON | **是，一次** |
+| `OUTPUT_SCHEMA_INVALID` | 合法 JSON 但不符合领域契约 | **是，一次** |
+| `OUTPUT_REFUSAL` | 模型拒答（safety / content_filter） | 否 |
+| `NO_PROVIDER` | 未配置该 Provider（不借用他人端点） | 否 |
+
+**自动修复上限：总请求 ≤ 2。** 修复 prompt 只允许「把已有结果改写成指定 schema，不添加新的事实」，**不重新分析数据**。
+
+### 10.3 结果落库规则
+
+- `AIAnalysis` = **审计记录**（完整 system/user prompt、原始响应、finishReason、parse 状态、tokens、耗时）。
+- `CommentAnalysis` = **产品结果**（UI 直接消费的强类型结构）。
+- **只有 `SUCCESS` 才写 `CommentAnalysis`**；任何失败都零落库，绝不留半成品。
+
+### 10.4 可验证性
+
+- `support` / `opposition` 的每一条论断都必须携带真实 `rpid`；UI 中点击 rpid 会**定位并高亮**对应本地评论。
+- 没有任何引用的论断会被显式标注 `[无引用]`，并计入「无引用论断」统计。
+- 引用到样本中不存在的 rpid 会被审计标记为「不存在的引用」。
+- `uncertainty` 强制说明样本量 / 清洗 / 抽样偏差 / 数据完整性；**情绪分布未由结构化输出提供时记 0 并注明「未提供」，不编造。**
+- 详见 `ai-history.html`（「AI 历史」）——可按类型筛选、展开查看每次请求的原始 prompt 与响应。
+
+## 十一、版本
+当前：**v3.0.0**（**V3.0.0「可验证 AI 分析系统」**：不是重写，在 V0.2.2 采集底座之上**重建 AI 层**。核心是把 AI 输出从「一段字符串」升级为「可验证的数据」——
+新增 `src/ai/schemas.ts`（统一领域契约，一处定义全 Provider 共用）、`src/ai/failures.ts`（7 种分层失败码，不再一律「AI 失败」）、`src/ai/json-schema.ts`（Zod → Strict JSON Schema）、`src/ai/orchestrator.ts`（统一编排 + 引用审计 + 最多 2 次请求 + 仅 SUCCESS 落库）；
+`max_tokens` 改三级优先级（评论默认 4096，不再一律 1024）；OpenAI/Gemini adapter 补齐 `finishReason` 等诊断；修复 Provider 名与端点静默错配；
+新增评论 AI 报告 9 分区 UI（`CommentAIReport`）与 AI 历史审计页（`ai-history.html`）；
+并修复一个**真实产品缺陷**——`{"ok":1}` 这类无关 JSON 会被 Zod `.default([])` 补全成「全空成功分析」（幽灵成功），现由结构签名前置校验 + `superRefine` 拦截为 `OUTPUT_SCHEMA_INVALID`。
+承接 V0.2.2 裸 BV 评论采集依赖闭环修复 → V0.2.1 评论采集真实性修复（`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
+
+历史版本：v0.2.2 / v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。

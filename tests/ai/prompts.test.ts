@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { buildCreatorAnalyzePrompt, buildVideoAnalyzePrompt, buildCommentAnalyzePrompt } from '@ai/prompts';
+import {
+  buildCreatorAnalyzePrompt,
+  buildVideoAnalyzePrompt,
+  buildCommentAnalyzePrompt,
+  buildRepairPrompt,
+  COMMENT_SCHEMA_TEXT,
+  GENERAL_SCHEMA_TEXT,
+} from '@ai/prompts';
 import type { Creator } from '@models/creator';
 import type { Video } from '@models/video';
 import type { Comment } from '@models/comment';
@@ -64,18 +71,17 @@ const comment: Comment = {
   source: 'wbi-main',
 };
 
-describe('prompts', () => {
-  it('buildCreatorAnalyzePrompt requires facts/explanations/uncertainty', () => {
+describe('prompts · Creator / Video', () => {
+  it('buildCreatorAnalyzePrompt declares the general schema (facts/explanations/uncertainty)', () => {
     const { system, user } = buildCreatorAnalyzePrompt({ creator, recentVideos: [video], recentSnapshots: [] });
-    expect(system).toMatch(/facts/);
-    expect(system).toMatch(/explanations/);
-    expect(system).toMatch(/uncertainty/);
+    expect(system).toContain('facts');
+    expect(system).toContain('explanations');
+    expect(system).toContain('uncertainty');
     expect(user).toContain('foo');
   });
 
   // V0.1.1 修复（独立验收反馈 · 字段错误）：
   // 原 buildCreatorAnalyzePrompt 误把 v.duration 当成 views 喂给 AI。
-  // 修复后 recentVideos 段只写 duration；views 数据由 snapshots 段承担。
   it('buildCreatorAnalyzePrompt: recentVideos uses correct duration field, not views', () => {
     const { user } = buildCreatorAnalyzePrompt({ creator, recentVideos: [video], recentSnapshots: [] });
     const parsed = JSON.parse(user) as {
@@ -84,10 +90,8 @@ describe('prompts', () => {
     };
     expect(parsed.recentVideos).toHaveLength(1);
     const v = parsed.recentVideos[0]!;
-    // 真实字段 = duration，不再误传 views（views 来自 snapshots）
     expect(v).toHaveProperty('duration', video.duration);
     expect(v).not.toHaveProperty('views');
-    // 模板里也不应有 "views: v.duration" 这类误导性片段
     expect(user).not.toMatch(/"views":\s*\d+/);
   });
 
@@ -96,9 +100,122 @@ describe('prompts', () => {
     expect(system).not.toMatch(/爆款概率/);
     expect(system).not.toMatch(/一定爆/);
   });
+});
 
-  it('buildCommentAnalyzePrompt anti wordcloud hallucination', () => {
+describe('prompts · Comment（V3.0 单 schema）', () => {
+  it('declares EXACTLY ONE schema — no contradictory second schema', () => {
     const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', comments: [comment] });
-    expect(system).toMatch(/主题|痛点|情绪/);
+    // 新 schema 的全部顶层字段必须出现
+    for (const field of [
+      'summary',
+      'facts',
+      'findings',
+      'themes',
+      'support',
+      'opposition',
+      'needs',
+      'questions',
+      'uncertainty',
+      'nextResearch',
+    ]) {
+      expect(system).toContain(field);
+    }
+    // 旧的、互相冲突的字段不得再出现
+    expect(system).not.toContain('"explanations"');
+    expect(system).not.toContain('"evidence": {');
+    // 不得再声明两套 schema（"必须分三段输出" 是旧矛盾来源）
+    expect(system).not.toMatch(/必须分三段输出/);
+  });
+
+  it('states the schema only once (no duplicated schema blocks)', () => {
+    const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', comments: [comment] });
+    const occurrences = system.split('"nextResearch"').length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it('requires rpid citations for support / opposition', () => {
+    const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', comments: [comment] });
+    expect(system).toMatch(/rpid/);
+    expect(system).toMatch(/support/);
+    expect(system).toMatch(/opposition/);
+  });
+
+  it('forbids the exact phrasing the user listed', () => {
+    const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', comments: [comment] });
+    // 第九节明列的禁用语必须逐条出现在 prompt 中
+    expect(system).toMatch(/大多数用户都/);
+    expect(system).toMatch(/用户普遍/);
+    expect(system).toMatch(/观众一定/);
+    expect(system).toMatch(/这个视频导致/);
+    expect(system).toMatch(/词频/);
+    expect(system).toMatch(/因果/);
+  });
+
+  it('requires uncertainty to state sample size / cleaning / bias / completeness', () => {
+    const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', comments: [comment] });
+    expect(system).toMatch(/样本量/);
+    expect(system).toMatch(/抽样偏差/);
+    expect(system).toMatch(/数据完整性/);
+  });
+
+  it('includes facts block separately and requires rpid citations', () => {
+    const { system, user } = buildCommentAnalyzePrompt({
+      videoId: 'v1',
+      comments: [comment],
+      factsJson: JSON.stringify({ totalCollected: 1, stats: { total: 1 }, keywords: [], topComments: [], droppedNoisy: 0 }),
+    });
+    expect(system).toMatch(/rpid/);
+    // 「facts 段不得编造数字」必须以某种形式出现
+    expect(system).toMatch(/禁止编造数字|不得编造数字/);
+    const parsed = JSON.parse(user) as { facts: unknown; sample: Array<{ rpid: string }> };
+    expect(parsed.facts).toBeTruthy();
+    expect(parsed.sample[0]!.rpid).toBe('1');
+  });
+
+  it('works without factsJson (backward compatible)', () => {
+    const { user } = buildCommentAnalyzePrompt({ videoId: 'v', comments: [] });
+    const parsed = JSON.parse(user) as { facts?: unknown };
+    expect(parsed.facts).toBeUndefined();
+  });
+
+  it('does not crash on malformed factsJson', () => {
+    const { user } = buildCommentAnalyzePrompt({
+      videoId: 'v',
+      comments: [comment],
+      factsJson: '{broken',
+    });
+    const parsed = JSON.parse(user) as { facts?: unknown };
+    expect(parsed.facts).toBeUndefined();
+    expect(parsed.sample).toHaveLength(1);
+  });
+});
+
+describe('prompts · 自动修复（V3.0 · 第七节）', () => {
+  it('repair prompt forbids re-analysis and new facts', () => {
+    const { system, user } = buildRepairPrompt({
+      domain: 'comment',
+      previousRaw: '{"summary":"x"}',
+      issues: ['support: Required'],
+    });
+    expect(system).toMatch(/严禁重新分析数据/);
+    expect(system).toMatch(/严禁添加任何新的/);
+    expect(user).toContain('把下面已有结果修正为指定 schema，不添加新的事实。');
+    expect(user).toContain('support: Required');
+  });
+
+  it('repair prompt reuses the SAME schema text as the normal prompt', () => {
+    const { system } = buildRepairPrompt({ domain: 'comment', previousRaw: '{}' });
+    expect(system).toContain(COMMENT_SCHEMA_TEXT);
+  });
+
+  it('repair prompt uses the general schema for creator domain', () => {
+    const { system } = buildRepairPrompt({ domain: 'creator', previousRaw: '{}' });
+    expect(system).toContain(GENERAL_SCHEMA_TEXT);
+    expect(system).not.toContain(COMMENT_SCHEMA_TEXT);
+  });
+
+  it('truncates overly long previous results', () => {
+    const { user } = buildRepairPrompt({ domain: 'comment', previousRaw: 'x'.repeat(20_000) });
+    expect(user.length).toBeLessThan(15_000);
   });
 });
