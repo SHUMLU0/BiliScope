@@ -2,6 +2,60 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/) 规范。
 
+## [V3.1.1] - 2026-09-29
+
+**Probe 旁路诊断 + AI 暂停恢复**：拆除 Probe「看门人」——探针只做旁路诊断，
+**不改 Main 请求、不决定 Main 成败、不主动 Abort Main**；新增「暂停 / 继续分析」；
+Main 请求全程指纹冻结；时长策略 8 档且**默认不限制**，彻底移除一切隐藏 timer。
+**不重写采集层 / CommentCollector / WBI / Dexie，不删历史数据与审计。**
+
+### Fixed
+
+- **Probe 看门误杀**：删除「Probe 30s 无有效响应 → 同时终止 Probe 与 Main →
+  `REQUEST_PROBE_TIMEOUT`」与「Probe !ok → abort Main」两条派生失败路径。
+  30 秒现在只是 **Probe 自己的观察窗**：超时 → Probe 以 `probe_timeout` 结束并留独立审计行，
+  **Main 原样继续**。探针失败（401 / 429 / 5xx）同理只留 `probe_failed` 审计行，
+  Main 照常完成 → **`Probe FAIL + Main SUCCESS = AI 分析成功（探针存在警告）`**。
+- **空响应误判**：探针收到 HTTP 2xx 即 `transportConnected=true`（含空响应体）；
+  探针空响应归纳为 `warning` 状态而非失败；**真正的 `OUTPUT_EMPTY` 只允许 Main 判定**。
+- **隐藏 timer 清除**：`noTotalTimeout` 字段废弃不再读写；`idleTimeoutMs = null / undefined`
+  统一表示「不限制」（不建任何人为 timer）；`ProviderConfig.timeoutMs` 退出计时决策；
+  `DEFAULT_TIMEOUT_MS = 300_000` 仅作为 `classifyRequestError` 的参考值存在，
+  任何请求路径都不得再出现隐藏的 30/60/120/300 秒强杀（`TIMEOUT-002` 红线测试锁定）。
+- **探针主动取消不再污染诊断分区**：Main 先完成 / 用户暂停或取消时，
+  Probe 返回 `skipped` 且**不留审计行**；仅真实失败 / 超时才留独立行。
+
+### Improved
+
+- **暂停 / 继续分析（PAUSE-001..005）**：分析进行中可点「暂停分析」
+  （Abort Main + Probe → 失败码 `REQUEST_PAUSED`，输入快照保留、不写 `CommentAnalysis`、
+  不留半截审计行）→ 点「继续分析」复用**完全相同**的 input snapshot 重发 Main
+  （不重新采集 / 不重排 sample / 不偷改参数）；暂停与无 reason 的取消严格区分。
+- **Main 请求指纹冻结（MAIN-001..003）**：baseRequest 构造后即生成不可变快照 +
+  SHA-256 `requestFingerprint`；Main 落定（成功或失败）后再次计算指纹，
+  测试证明 `fingerprintBefore === fingerprintAfter`——请求在编排全程从未被 mutate；
+  指纹随审计落库，可复核。
+- **时长策略 8 档（TIME-001..007）**：设置页可选
+  `不限制（默认）/ 60 / 120 / 180 / 300 / 600 / 900 / 1800 秒`；
+  设置存储 `IdleTimeoutPref = number | null`，损坏 / 缺失值一律归一为 `null`（不限制）。
+- **Probe 状态三态可见（PROBE-001..008）**：UI 独立状态行显示 Probe
+  （`pending / healthy / warning / timeout / failed / skipped`）与 Main 各自的真实状态与耗时；
+  探针审计回写 `meta.probe` 携带 `status / transportConnected / modelResponded` 三态
+  （替代旧 success 布尔）。
+- 失败分层升级为 **16 码**：新增 `REQUEST_PAUSED`（不可重试、与取消严格区分）；
+  `REQUEST_PROBE_TIMEOUT` 标记 `@deprecated`（保留枚举兼容旧审计数据，但**不再产生**）。
+
+### Tests
+
+- 新增 `tests/ai/fingerprint.test.ts`（序列化确定性 / SHA-256 敏感性 / MAIN-001..003）。
+- 新增 `tests/ai/pause.test.ts`（PAUSE-001..005：暂停零落库 / 继续复用同一快照 /
+  两次指纹一致 / 无 reason 取消不混淆 / 探针同时终止不留行）。
+- `tests/ai/probes.test.ts` 全量重写为新旁路语义（PROBE-001..008 + AI-LIMIT-004）。
+- `tests/ai/timeout.test.ts` 扩展 TIME-001..007（settings 层损坏值归一 null）。
+- `tests/ai/privacy.test.ts` 新增 PRIVACY-001..004（Probe / Main 双通道零身份）。
+- 本地全量：**40 文件 / 421 passed / 2 skipped**（V3.1.0 基线 38 / 403 / 2，
+  +18 测试 +2 文件）。
+
 ## [V3.1.0] - 2026-09-29
 
 **Research Workspace（研究工作台）**：AI 评论数据**隐私化**（AI 只见匿名引用，真实 ID 留本地）、

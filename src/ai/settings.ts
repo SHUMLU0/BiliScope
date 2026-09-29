@@ -129,25 +129,26 @@ export function isValidProviderConfig(cfg: ProviderConfig | null): cfg is Provid
 export type { Store as ProviderStore };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// V3.1.0 · P0-AI 时长放宽：全局「流式空闲超时」偏好（非 per-Provider）。
+// V3.1.1 · 计时二态：全局「流式空闲/总时长上限」偏好（非 per-Provider）。
 //
-// 三态语义与 AnalyzeRequest.idleTimeoutMs 一致：
-//   - `undefined`（key 不存在）= 跟随默认 300s（DEFAULT_IDLE_TIMEOUT_MS）；
-//   - `number`  = UI 指定（60/120/180/300s）；
-//   - `null`    = **不限制**（不创建 idle timer；AbortController 仍保留）。
+// 语义与 AnalyzeRequest.idleTimeoutMs 一致（二态）：
+//   - `number` = UI 指定档位（60/120/180/300/600/900/1800s）；
+//   - `null`   = **不限制**（不创建任何 BiliScope 人为 timer）。
+// V3.1.1 起默认值为**不限制**（key 不存在 / 损坏值 → null）——
+// 不再存在任何隐藏默认 timer；不设置就是不限制。
 // Test Mode 是更硬的全局开关（orchestrator 强制归一 null），本偏好只在非 Test Mode 生效。
 // ─────────────────────────────────────────────────────────────────────────────
 
 const IDLE_KEY = 'biliscope.ai.idleTimeout.v1';
 
-export type IdleTimeoutPref = number | null | undefined;
+export type IdleTimeoutPref = number | null;
 
 function parseIdleTimeout(raw: string | null | undefined): IdleTimeoutPref {
-  if (raw == null || raw === '') return undefined;
+  if (raw == null || raw === '') return null;
   if (raw === 'unlimited') return null;
   const n = Number(raw);
-  // 防御：损坏/过小的值一律回落默认（最短 1s，正常选项从 60s 起）
-  return Number.isFinite(n) && n >= 1_000 ? n : undefined;
+  // 防御：损坏/过小的值一律回落「不限制」（最短 1s，正常选项从 60s 起）
+  return Number.isFinite(n) && n >= 1_000 ? n : null;
 }
 
 export async function loadIdleTimeoutAsync(): Promise<IdleTimeoutPref> {
@@ -162,7 +163,7 @@ export async function loadIdleTimeoutAsync(): Promise<IdleTimeoutPref> {
   try {
     return parseIdleTimeout(localStorage.getItem(IDLE_KEY));
   } catch {
-    return undefined;
+    return null;
   }
 }
 

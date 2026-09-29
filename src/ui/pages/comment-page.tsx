@@ -5,6 +5,7 @@ import { commentRepo, videoRepo, aiAnalysisRepo, commentAnalysisRepo } from '@re
 import { buildCommentAnalyzePrompt } from '@ai/prompts';
 import { orchestrateCommentAnalysis } from '@ai/orchestrator';
 import { loadIdleTimeoutAsync } from '@ai/settings';
+import { describeProbeStatus } from '@ai/probe';
 import { describeFailure, type AIFailureInfo } from '@ai/failures';
 import type { CommentAIResult } from '@ai/schemas';
 import type { StreamProgress } from '@ai/types';
@@ -37,6 +38,28 @@ interface StoredReport {
   analysisResult: CommentAIResult | null;
 }
 
+/**
+ * V3.1.1：AI 分析输入快照（不可变）。
+ * 「继续分析」必须复用**完全相同**的快照重发 Main —— 不重新采集评论、
+ * 不重排 sample、不偷改 prompt / maxTokens / schema / 时长 / Test Mode，
+ * 保证两次运行的 requestFingerprint 一致（PAUSE-003）。
+ */
+interface AISnapshot {
+  videoId: string;
+  systemPrompt: string;
+  userPrompt: string;
+  factsJson: string;
+  knownRefs: string[];
+  citationMap: Record<string, string>;
+  maxTokens?: number;
+  testMode: boolean;
+  idleTimeoutMs: number | null;
+  totalComments: number;
+  sampleCount: number;
+  totalChars: number;
+  strategyLabel: string;
+}
+
 export function CommentPage() {
   const [bvid, setBvid] = useState('');
   const [comments, setComments] = useState<Comment[]>([]);
@@ -61,8 +84,11 @@ export function CommentPage() {
   const [aiOutputLimitCustom, setAiOutputLimitCustom] = useState(8192);
   // AI Test Mode：关闭 BiliScope 一切人为 token/总时长限制（Provider 自身限制仍生效）
   const [aiTestMode, setAiTestMode] = useState(false);
-  // 用户取消通道（同时终止 Probe 与 Main）
+  // 用户取消/暂停通道（同时终止 Probe 与 Main；abort('pause') = 暂停，走 REQUEST_PAUSED 通道）
   const aiAbort = useRef<AbortController | null>(null);
+  // V3.1.1：暂停/继续 —— 暂停时保留的输入快照；「继续分析」复用**完全相同**快照重发 Main
+  const [aiPaused, setAiPaused] = useState(false);
+  const aiSnapshotRef = useRef<AISnapshot | null>(null);
 
   // ── V3.0：AI 分析状态（强类型，不再是裸字符串） ──
   const [aiBusy, setAiBusy] = useState(false);
@@ -198,88 +224,65 @@ export function CommentPage() {
   };
 
   /**
-   * V3.0 · 第五节：不再手工拼 JSON。
-   * 全流程交给 orchestrator：构造 prompt → 请求 → Zod 校验 → 自动修复 → 落库。
-   * V3.0.2：probe_guarded 编排 —— Probe 与 Main 并行，真实阶段提示，用户可取消。
+   * V3.1.1：以给定**输入快照**执行一次分析（busy 生命周期归 handleAI/handleResume 管）。
+   * 暂停 → orchestrate 返回 REQUEST_PAUSED（快照保留，UI 显示「继续分析」）；
+   * 「继续分析」直接以同一个快照对象再调本函数 —— 复用完全相同输入，指纹必然一致。
    */
-  const handleAI = async (): Promise<void> => {
-    const video = await videoRepo.findByBvid(bvid);
-    if (!video || comments.length === 0) {
-      setStatusLevel('warn');
-      setStatus('请先采集评论');
-      return;
-    }
-    setStatusLevel('info');
-    setAiFailure(null);
-    setStatusLevel('info');
-    setAiBusy(true);
-    // V3.0.1 · 第七节：真实阶段提示（不编造百分比）
-    setAiStage('准备数据…');
-    setAiStream(null);
-    aiT0.current = performance.now();
-    setAiElapsed(0);
-    // V3.0.2：本次分析的中止通道（用户取消 → 同时终止 Probe 与 Main）
+  const runAnalysis = async (snap: AISnapshot): Promise<void> => {
     const ctrl = new AbortController();
     aiAbort.current = ctrl;
     try {
-      // V3.0.1 · P0-1：受控样本（唯一采样入口）
-      const prep = prepareCommentAnalysis(comments, { sampleStrategy, sampleLimit: aiSampleLimit });
-      setAiBudget(prep.budget);
-      setAiStage('构造分析上下文…');
-      const factsJson = serializeCommentFacts(prep);
-      const { system, user } = buildCommentAnalyzePrompt({
-        sample: prep.sample,
-        totalComments: prep.total,
-        factsJson,
-        requireCitations: true,
-      });
       setStatus(
-        `AI 分析中 · 统计基数 ${prep.total} 条 · AI 样本 ${prep.sample.length} 条（${SAMPLE_STRATEGY_LABEL[prep.sampleStrategy]}）· 约 ${Math.round(prep.budget.totalChars / 1000)}k 字符`,
+        `AI 分析中 · 统计基数 ${formatInt(snap.totalComments)} 条 · AI 样本 ${formatInt(snap.sampleCount)} 条（${snap.strategyLabel}）` +
+          ` · 约 ${formatInt(Math.round(snap.totalChars / 1000))}k 字符` +
+          ` · 输出上限 ${snap.maxTokens === undefined ? 'Auto' : String(snap.maxTokens)}` +
+          ` · 时长 ${snap.idleTimeoutMs === null ? '不限制' : `${Math.round(snap.idleTimeoutMs / 1000)}s`}` +
+          (snap.testMode ? ' · Test Mode' : ''),
       );
 
       setAiStage('启动 Provider 探针…');
       const r = await orchestrateCommentAnalysis({
-        videoId: video.id,
-        systemPrompt: system,
-        userPrompt: user,
-        factsJson,
+        videoId: snap.videoId,
+        systemPrompt: snap.systemPrompt,
+        userPrompt: snap.userPrompt,
+        factsJson: snap.factsJson,
         // V3.1.0 · P0-AI 隐私化：模型只见匿名 ref（C001…）—— 白名单与映射都来自 prepare 层。
         // ref → 真实 rpid 的映射只落本地 CommentAnalysis.citationMap，绝不发给 Provider。
-        knownRefs: prep.sample.map((c) => c.ref),
-        citationMap: prep.citationMap,
-        // V3.0.1 · P0-A：流式进度透传到 UI。
-        // 只更新展示，不参与任何业务判定；收到首个有效 chunk 后才切到「已开始输出」。
+        knownRefs: snap.knownRefs,
+        citationMap: snap.citationMap,
+        // V3.0.1 · P0-A：流式进度透传到 UI（只更新展示，不参与任何业务判定）。
         onProgress: (info) => {
           setAiStream(info);
-          // V3.0.2：真实阶段推进 —— Probe → Main，不显示虚假百分比
+          // V3.1.1：真实阶段推进 —— 探针只旁路诊断，异常/超时都**不影响**分析运行
           if (info.phase === 'probe_pending') {
             setAiStage('启动 Provider 探针…');
           } else if (info.phase === 'probe_ready') {
-            setAiStage('Probe 已响应 · 开始等待完整分析…');
+            setAiStage('探针已落定 · 分析运行中…');
+          } else if (info.phase === 'probe_timeout') {
+            setAiStage('探针观察窗超时（不影响分析）…');
           } else if (info.phase === 'probe_failed') {
-            setAiStage('探针异常…');
+            setAiStage('探针异常（不影响分析）…');
           } else if (info.phase === 'streaming') {
             setAiStage('模型已开始输出…');
           }
         },
-        // V3.0.2：输出上限（Auto = 请求体不带 max_tokens；显式数字才发送）
-        maxTokens:
-          aiOutputLimit === 'auto'
-            ? undefined
-            : aiOutputLimit === 'custom'
-              ? aiOutputLimitCustom
-              : aiOutputLimit,
-        // V3.0.2：AI Test Mode（关闭 BiliScope 人为 token/总时长限制）
-        testMode: aiTestMode,
-        // V3.1.0 · P0-AI 时长放宽：全局空闲超时偏好（undefined=默认 300s / number=指定 /
-        // null=不限制；Test Mode 下 orchestrator 会强制归一为 null，这里无需重复处理）
-        idleTimeoutMs: await loadIdleTimeoutAsync(),
-        // V3.0.2：用户取消信号（同时终止 Probe 与 Main）
+        // 输出上限 / Test Mode / 时长：全部来自**冻结快照**（继续分析时不偷改）
+        maxTokens: snap.maxTokens,
+        testMode: snap.testMode,
+        idleTimeoutMs: snap.idleTimeoutMs,
+        // V3.1.1：用户中止信号（abort reason='pause' → PAUSED 通道；否则=取消）
         signal: ctrl.signal,
       });
 
       setAiStage('校验结果…');
       if (!r.ok) {
+        // V3.1.1：暂停 ≠ 失败 —— 快照保留，UI 出现「继续分析」；绝不写半截结果
+        if (r.status === 'REQUEST_PAUSED') {
+          setAiPaused(true);
+          setStatusLevel('warn');
+          setStatus('已暂停：输入快照已保留，可点击「继续分析」恢复（不重新采集、不重排样本）');
+          return;
+        }
         // V3.0 · 第六节 + V3.0.1 · P1-6：显示真实失败原因；**不清空已有成功结果**
         setAiFailure(describeFailure(r.status, r.detail));
         setStatusLevel(r.status === 'OUTPUT_TRUNCATED' ? 'warn' : 'error');
@@ -300,7 +303,7 @@ export function CommentPage() {
       setReport({
         record: {
           id: r.domainRecordId ?? '',
-          videoId: video.id,
+          videoId: snap.videoId,
           createdAt: new Date().toISOString(),
           model: r.usedConfig.model,
           factSummary: r.data.facts.join('\n'),
@@ -313,7 +316,7 @@ export function CommentPage() {
           citedCommentRpids: r.citations.totalCitations ? [] : [],
           uncertaintyNote: r.data.uncertainty.join('\n'),
           // V3.1.0 · P0-AI 隐私化：内存里的产品结果也带映射（DB 记录由 orchestrate 落库）
-          citationMap: prep.citationMap,
+          citationMap: snap.citationMap,
         },
         // V3.0.1 · P0-2：产品结果持有结构化业务结果（不是 Provider 原始响应）
         analysisResult: r.data,
@@ -329,10 +332,99 @@ export function CommentPage() {
       setStatusLevel('info');
       setStatus(
         `AI 完成 · ${r.durationMs}ms · ${r.requestCount} 次请求${r.repaired ? '（含 1 次自动修复）' : ''} · Provider ${r.usedConfig.name}/${r.usedConfig.model}` +
-          // V3.0.2：Probe 耗时分区显示（probe_guarded 下存在）
-          (r.probe && r.probe.ok ? ` · Probe ${(r.probe.latencyMs / 1000).toFixed(1)}s` : ''),
+          // V3.1.1：探针诊断独立显示 —— 探针异常（含警告）不影响「AI 完成」判定
+          (r.probe ? ` · ${describeProbeStatus(r.probe)}` : ''),
       );
       await refresh();
+    } finally {
+      aiAbort.current = null;
+    }
+  };
+
+  /**
+   * V3.0 · 第五节：不再手工拼 JSON。
+   * 全流程交给 orchestrator：构造 prompt → 请求 → Zod 校验 → 自动修复 → 落库。
+   * V3.1.1：先**冻结输入快照**，再进入 runAnalysis；暂停后可复用同一快照继续。
+   */
+  const handleAI = async (): Promise<void> => {
+    const video = await videoRepo.findByBvid(bvid);
+    if (!video || comments.length === 0) {
+      setStatusLevel('warn');
+      setStatus('请先采集评论');
+      return;
+    }
+    setStatusLevel('info');
+    setAiFailure(null);
+    setAiPaused(false);
+    setAiBusy(true);
+    // V3.0.1 · 第七节：真实阶段提示（不编造百分比）
+    setAiStage('准备数据…');
+    setAiStream(null);
+    aiT0.current = performance.now();
+    setAiElapsed(0);
+    try {
+      // V3.0.1 · P0-1：受控样本（唯一采样入口）
+      const prep = prepareCommentAnalysis(comments, { sampleStrategy, sampleLimit: aiSampleLimit });
+      setAiBudget(prep.budget);
+      setAiStage('构造分析上下文…');
+      const factsJson = serializeCommentFacts(prep);
+      const { system, user } = buildCommentAnalyzePrompt({
+        sample: prep.sample,
+        totalComments: prep.total,
+        factsJson,
+        requireCitations: true,
+      });
+      // V3.1.1：冻结输入快照（含输出上限 / Test Mode / 时长的**当时取值**）。
+      // 暂停后「继续分析」复用该快照，保证 requestFingerprint 前后一致。
+      const snap: AISnapshot = {
+        videoId: video.id,
+        systemPrompt: system,
+        userPrompt: user,
+        factsJson,
+        knownRefs: prep.sample.map((c) => c.ref),
+        citationMap: prep.citationMap,
+        maxTokens:
+          aiOutputLimit === 'auto'
+            ? undefined
+            : aiOutputLimit === 'custom'
+              ? aiOutputLimitCustom
+              : aiOutputLimit,
+        testMode: aiTestMode,
+        idleTimeoutMs: await loadIdleTimeoutAsync(),
+        totalComments: prep.total,
+        sampleCount: prep.sample.length,
+        totalChars: prep.budget.totalChars,
+        strategyLabel: SAMPLE_STRATEGY_LABEL[prep.sampleStrategy],
+      };
+      aiSnapshotRef.current = snap;
+      await runAnalysis(snap);
+    } catch (e) {
+      setAiFailure(describeFailure('REQUEST_FAILED', e instanceof Error ? e.message : String(e)));
+      setStatusLevel('error');
+      setStatus(`REQUEST_FAILED · ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setAiStage('');
+      setAiStream(null);
+      setAiBusy(false);
+      aiAbort.current = null;
+    }
+  };
+
+  /**
+   * V3.1.1 · 继续分析：复用**完全相同**的输入快照重发 Main。
+   * 不重新采集评论、不重排 sample、不偷改 prompt / 输出上限 / 时长模式。
+   */
+  const handleResume = async (): Promise<void> => {
+    const snap = aiSnapshotRef.current;
+    if (!snap) return;
+    setAiPaused(false);
+    setAiFailure(null);
+    setAiStream(null);
+    aiT0.current = performance.now();
+    setAiElapsed(0);
+    setAiBusy(true);
+    try {
+      await runAnalysis(snap);
     } catch (e) {
       setAiFailure(describeFailure('REQUEST_FAILED', e instanceof Error ? e.message : String(e)));
       setStatusLevel('error');
@@ -419,6 +511,20 @@ export function CommentPage() {
     for (const f of r.findings) add(f.evidenceRefs);
     return s;
   }, [report]);
+
+  // V3.1.1：探针独立状态行 —— 只由探针自己的诊断结果驱动，与 Main 状态完全分离
+  const probeStatusDisplay = describeProbeStatus(
+    aiStream?.probeStatus
+      ? {
+          ok: true,
+          status: aiStream.probeStatus,
+          transportConnected: true,
+          modelResponded: true,
+          latencyMs: aiStream.probeLatencyMs ?? 0,
+          error: aiStream.probeDetail,
+        }
+      : undefined,
+  );
 
   return (
     <div className="container stack">
@@ -559,7 +665,9 @@ export function CommentPage() {
             <h3 style={{ margin: 0 }}>AI 分析状态</h3>
             <span className="row">
               <span className="faint mono">{aiElapsed}s</span>
-              {/* V3.0.2：用户取消 —— 同时终止 Probe 与 Main */}
+              {/* V3.1.1：暂停 —— 终止 Main+Probe、保留输入快照，可「继续分析」恢复 */}
+              <button onClick={() => aiAbort.current?.abort('pause')}>暂停分析</button>
+              {/* 用户取消 —— 同时终止 Probe 与 Main，不保留快照 */}
               <button onClick={() => aiAbort.current?.abort()}>取消分析</button>
             </span>
           </div>
@@ -569,7 +677,9 @@ export function CommentPage() {
               '准备数据…',
               '构造分析上下文…',
               '启动 Provider 探针…',
-              'Probe 已响应 · 开始等待完整分析…',
+              '探针已落定 · 分析运行中…',
+              '探针异常（不影响分析）…',
+              '探针观察窗超时（不影响分析）…',
               '模型已开始输出…',
               '校验结果…',
               '保存分析…',
@@ -579,12 +689,10 @@ export function CommentPage() {
               </span>
             ))}
           </div>
-          {/* V3.0.2：Probe / Analysis 耗时分区显示（真实数字，不编造） */}
-          {aiStream?.probeLatencyMs !== undefined && (
-            <div className="faint mono">
-              Probe {(aiStream.probeLatencyMs / 1000).toFixed(1)}s · Analysis {aiElapsed}s
-            </div>
-          )}
+          {/* V3.1.1：Probe 与 Main 的状态**完全分离**（两行独立显示；
+              探针异常只出现在探针行，绝不改写分析行的状态） */}
+          <div className="faint mono">{probeStatusDisplay}</div>
+          <div className="faint mono">分析：运行中 · {aiElapsed}s</div>
           {/* V3.0.1 · P0-A：流式实时进度（只有真实字符数与真实秒数，没有假百分比） */}
           {aiStream && aiStream.phase === 'streaming' ? (
             <div className="faint">
@@ -627,6 +735,35 @@ export function CommentPage() {
             {report.record.model}
             {aiBudget ? ` · 本次输入 ${aiBudget.sampleCount} 条样本` : ''}
           </div>
+        </section>
+      )}
+
+      {/* V3.1.1：暂停态 —— 输入快照完整保留，「继续分析」复用同一快照重发 Main */}
+      {aiPaused && !aiBusy && (
+        <section className="card stack">
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <h3 style={{ margin: 0 }}>AI 分析已暂停</h3>
+            <button className="primary" onClick={handleResume}>
+              继续分析
+            </button>
+          </div>
+          <div className="warn">
+            已暂停：请求已终止，输入快照完整保留。点击「继续分析」将复用**完全相同**的输入快照重发 ——
+            不重新采集评论、不重排样本、不修改 prompt / 输出上限 / 时长模式。
+          </div>
+          {aiSnapshotRef.current && (
+            <div className="faint mono">
+              快照：样本 {formatInt(aiSnapshotRef.current.sampleCount)} 条 · 输出上限{' '}
+              {aiSnapshotRef.current.maxTokens === undefined
+                ? 'Auto'
+                : aiSnapshotRef.current.maxTokens}{' '}
+              · 时长{' '}
+              {aiSnapshotRef.current.idleTimeoutMs === null
+                ? '不限制'
+                : `${Math.round(aiSnapshotRef.current.idleTimeoutMs / 1000)}s`}
+              {aiSnapshotRef.current.testMode ? ' · Test Mode' : ''}
+            </div>
+          )}
         </section>
       )}
 

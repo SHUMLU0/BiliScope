@@ -156,15 +156,22 @@ AI 分析走统一编排：**Provider → 请求 → 结构化输出 → Zod 校
 - 详见 `ai-history.html`（「AI 历史」）——可按类型筛选、展开查看每次请求的原始 prompt 与响应。
 
 ## 十一、版本
-当前：**v3.1.0**（**V3.1.0 —— Research Workspace（研究工作台）**。核心：AI 评论数据**隐私化**与工作台 UI：
-① **AI 匿名引用**——AI 请求完全不含 rpid/uname/mid/videoId，模型只见 `{ref:"C001",…}`；
-`ref→rpid` 映射（citationMap）只随产品结果落本地库，绝不发送 Provider；UI 点击 ref 经映射回溯；
-② **AI 时长策略**——流式空闲超时默认 **300s**，可选 60/120/180/300/**不限制**（null 只是不建 idle
-timer，AbortController 保留，真实断连/取消仍必须失败）；**AI Test Mode 下 orchestrator 强制归一为
-不限制**；③ **研究台 Dashboard**（新首页，只读 IndexedDB 禁联网，KPI 排除探针行）；
-④ **Popup 重做**（上下文卡 / 快速操作 / 最近任务 / 零 inline style）；
-⑤ **视频库 / 选题库 / Idea→Experiment / 导入导出 UI**；
-⑥ **导出版本号修复**（EXPORT-VERSION-001：硬编码 '0.1.0' → `__APP_VERSION__` 单一来源 package.json）。
-承接 V3.0.2 AI 开放测试模式 → V3.0.1 稳定性/性能/UI/文档维护版 → V3.0.0 可验证 AI 分析系统 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V0.2.1 评论采集真实性修复（`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
+当前：**v3.1.1**（**V3.1.1 —— Probe 旁路诊断 + AI 暂停恢复**。核心：
+① **Probe 拆除看门人**——探针只做旁路诊断：不改 Main 请求、不决定 Main 成败、不主动 Abort Main；
+30s 只是 Probe 自己的观察窗（超时 → Probe 结束，Main 继续）；HTTP 2xx 即 `transportConnected=true`
+（含空响应）；空响应 = warning；真正 `OUTPUT_EMPTY` 只允许 Main 判定；
+**`Probe FAIL + Main SUCCESS = 分析成功（探针存在警告）`**；`REQUEST_PROBE_TIMEOUT` 废弃不再产生；
+② **暂停 / 继续分析**——暂停（Abort Main+Probe → `REQUEST_PAUSED`、保留输入快照、不写产品结果、
+不留半截审计行）→ 继续复用**完全相同**的 input snapshot 重发 Main（不重新采集 / 不重排 sample）；
+③ **Main 请求指纹冻结**——不可变快照 + SHA-256 `requestFingerprint`，
+`fingerprintBefore === fingerprintAfter` 由测试证明请求全程未被 mutate，指纹随审计落库；
+④ **时长策略 8 档**——`不限制（默认）/ 60/120/180/300/600/900/1800 秒`；
+`idleTimeoutMs = null/undefined` = 不建任何人为 timer；`noTotalTimeout` 废弃，
+任何路径不得再有隐藏 30/60/120/300s 强杀；**不限制 ≠ 删除中止能力**；
+⑤ 失败分层 16 码（新增 `REQUEST_PAUSED`）。
+承接 V3.1.0 Research Workspace（AI 隐私化 + 工作台 UI）→ V3.0.2 AI 开放测试模式 →
+V3.0.1 稳定性/性能/UI/文档维护版 → V3.0.0 可验证 AI 分析系统 → V0.2.2 裸 BV 评论采集依赖闭环修复 →
+V0.2.1 评论采集真实性修复（`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 →
+V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
 
-历史版本：v3.0.2 / v3.0.1 / v3.0.0 / v0.2.2 / v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。
+历史版本：v3.1.0 / v3.0.2 / v3.0.1 / v3.0.0 / v0.2.2 / v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。

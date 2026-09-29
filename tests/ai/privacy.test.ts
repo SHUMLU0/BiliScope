@@ -243,3 +243,150 @@ describe('AI-PRIVACY-003 · 历史 reload 后 citationMap 仍可用', () => {
     }
   });
 });
+
+// ══════════════════════════════════════════════════════════ V3.1.1 · PRIVACY-001..004
+/**
+ * V3.1.1 补充验收：Probe（旁路诊断）与 Main（正式分析）**双通道**零身份。
+ * Probe 请求体是独立的极轻对象（buildProbeRequest），天然不含评论数据；
+ * 本组测试把这条不变量钉死 —— 任何身份字段进入任一通道都会让断言红。
+ */
+describe('V3.1.1 · PRIVACY-001..004 · Probe/Main 双通道零身份', () => {
+  interface CapturedBody {
+    messages?: Array<{ role: string; content: string }>;
+    max_tokens?: number;
+  }
+
+  function makeDualChannelMock(o: {
+    probe: 'ok' | 'reject401';
+    mainDelayMs?: number;
+  }): { captured: { probe?: CapturedBody; main?: CapturedBody } } {
+    const captured: { probe?: CapturedBody; main?: CapturedBody } = {};
+    globalThis.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as CapturedBody;
+      const isProbe =
+        body.max_tokens === 32 && body.messages?.some((m) => m.role === 'user' && m.content === 'probe');
+      if (isProbe) {
+        captured.probe = body;
+        if (o.probe === 'reject401') {
+          await new Promise((res) => setTimeout(res, 10));
+          throw new Error('HTTP 401 Unauthorized（认证失败）');
+        }
+        return new Response(
+          JSON.stringify({
+            choices: [{ finish_reason: 'stop', message: { content: 'OK' } }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      captured.main = body;
+      await new Promise((res) => setTimeout(res, o.mainDelayMs ?? 0));
+      return new Response(
+        JSON.stringify({
+          choices: [{ finish_reason: 'stop', message: { content: AI_RESULT_WITH_REFS } }],
+          usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+    return { captured };
+  }
+
+  async function runOrchestrate(): Promise<void> {
+    const prep = prepareCommentAnalysis(makeComments());
+    // 用**真实构造的 prompt**（不是占位字符串）—— Main 请求体断言才有意义
+    const { system, user } = buildCommentAnalyzePrompt({
+      sample: prep.sample,
+      totalComments: prep.total,
+      factsJson: serializeCommentFacts(prep),
+      requireCitations: true,
+    });
+    await orchestrate({
+      domain: 'comment',
+      targetId: REAL_VIDEO_ID,
+      systemPrompt: system,
+      userPrompt: user,
+      knownRefs: Object.keys(prep.citationMap),
+      citationMap: prep.citationMap,
+    });
+  }
+
+  it('PRIVACY-001: Probe 请求体零身份、零评论数据（独立极轻对象，只有 probe 探针语料）', async () => {
+    saveCfg();
+    await clearAll();
+    const { captured } = makeDualChannelMock({ probe: 'ok', mainDelayMs: 50 });
+    await runOrchestrate();
+    expect(captured.probe).toBeTruthy();
+    const s = JSON.stringify(captured.probe);
+    // 四类真实身份值全部不得出现
+    expect(s).not.toContain(REAL_RPID);
+    expect(s).not.toContain(REAL_UNAME);
+    expect(s).not.toContain(REAL_VIDEO_ID);
+    expect(s).not.toContain(REAL_MID);
+    // 探针绝不携带评论正文（用正文中独有的词做金丝雀）
+    expect(s).not.toContain('画质');
+    // 探针语料就是那一句固定探针 prompt
+    expect(s).toContain('probe');
+  });
+
+  it('PRIVACY-002: Main 请求体零身份；匿名 ref（C001）在场', async () => {
+    saveCfg();
+    await clearAll();
+    const { captured } = makeDualChannelMock({ probe: 'ok', mainDelayMs: 50 });
+    await runOrchestrate();
+    expect(captured.main).toBeTruthy();
+    const s = JSON.stringify(captured.main);
+    expect(s).not.toContain(REAL_RPID);
+    expect(s).not.toContain(REAL_UNAME);
+    expect(s).not.toContain(REAL_VIDEO_ID);
+    expect(s).not.toContain(REAL_MID);
+    // 匿名引用在场（模型只见 ref）
+    expect(s).toContain('C001');
+  });
+
+  it('PRIVACY-003: Probe 失败审计行 —— 发给 Provider 的语料与诊断 meta 零身份', async () => {
+    saveCfg();
+    await clearAll();
+    // probe 10ms 即 401（失败 → 留独立审计行）；main 100ms 后成功
+    makeDualChannelMock({ probe: 'reject401', mainDelayMs: 100 });
+    await runOrchestrate();
+    const audits = await db.aiAnalyses.toArray();
+    const probeRows = audits.filter((a) => a.requestType === 'probe');
+    expect(probeRows).toHaveLength(1);
+    const row = probeRows[0]!;
+    // 「零身份」约束的是**发给 Provider 的内容**（probe 语料）与诊断 meta；
+    // 审计行的 targetId 是本地归档键（与产品结果同 key），不属于外发通道。
+    const sent = `${row.systemPrompt} ${row.userPrompt}`;
+    const metaStr = JSON.stringify((row.parsedResult as Record<string, unknown>).__meta ?? {});
+    for (const s of [sent, metaStr]) {
+      expect(s).not.toContain(REAL_RPID);
+      expect(s).not.toContain(REAL_UNAME);
+      expect(s).not.toContain(REAL_VIDEO_ID);
+      expect(s).not.toContain(REAL_MID);
+    }
+    // 失败原因如实记录
+    expect(metaStr).toContain('401');
+  });
+
+  it('PRIVACY-004: 成功审计 meta（probe 三态 + 请求指纹）零身份', async () => {
+    saveCfg();
+    await clearAll();
+    makeDualChannelMock({ probe: 'ok', mainDelayMs: 50 });
+    await runOrchestrate();
+    const audits = await db.aiAnalyses.toArray();
+    const analysisRow = audits.find((a) => a.requestType !== 'probe');
+    expect(analysisRow).toBeTruthy();
+    const meta = ((analysisRow!.parsedResult as Record<string, unknown>).__meta ?? {}) as Record<
+      string,
+      unknown
+    >;
+    expect(meta.status).toBe('SUCCESS');
+    expect(meta.probe).toBeTruthy();
+    expect(meta.requestFingerprintBefore).toBeTruthy();
+    const s = JSON.stringify(meta);
+    expect(s).not.toContain(REAL_RPID);
+    expect(s).not.toContain(REAL_UNAME);
+    expect(s).not.toContain(REAL_VIDEO_ID);
+    expect(s).not.toContain(REAL_MID);
+  });
+});

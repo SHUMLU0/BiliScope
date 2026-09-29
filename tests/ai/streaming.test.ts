@@ -1,11 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  DEFAULT_IDLE_TIMEOUT_MS,
-  FALLBACK_TIMEOUT_MS,
-  STREAM_FIRST_BYTE_TIMEOUT_MS,
-  consumeSseStream,
-  parseSseDataLines,
-} from '@ai/streaming';
+import * as streamingModule from '@ai/streaming';
+import { STREAM_FIRST_BYTE_TIMEOUT_MS, consumeSseStream, parseSseDataLines } from '@ai/streaming';
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -13,22 +8,25 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('streaming · 超时常量（V3.1.0 任务书硬性数字）', () => {
+describe('streaming · 超时常量（V3.1.1：默认不限制，无隐藏 timer）', () => {
   it('首个响应等待 = 30s（仅提示，绝不当总时长上限用）', () => {
     expect(STREAM_FIRST_BYTE_TIMEOUT_MS).toBe(30_000);
   });
 
-  it('TIMEOUT-001: 流式空闲默认上限 = 300s（V3.1.0：120s → 300s 放宽）', () => {
-    expect(DEFAULT_IDLE_TIMEOUT_MS).toBe(300_000);
+  it('TIMEOUT-001: 隐藏默认已废除 —— 模块不再导出 DEFAULT_IDLE_TIMEOUT_MS / FALLBACK_TIMEOUT_MS', () => {
+    const mod = streamingModule as unknown as Record<string, unknown>;
+    expect(mod.DEFAULT_IDLE_TIMEOUT_MS).toBeUndefined();
+    expect(mod.FALLBACK_TIMEOUT_MS).toBeUndefined();
   });
 
-  it('TIMEOUT-001: 非流式 fallback 默认超时 = 300s（与默认空闲上限一致）', () => {
-    expect(FALLBACK_TIMEOUT_MS).toBe(300_000);
-  });
-
-  it('不存在「30s 总时长硬切断」意义上的常量', () => {
-    // 30s 只作为首字节提示阈值，绝不能被当作总时长上限使用
-    expect(DEFAULT_IDLE_TIMEOUT_MS).not.toBe(30_000);
+  it('TIMEOUT-002: 除首字节提示外不存在任何超时常量（计时完全由 idleTimeoutMs 二态决定）', () => {
+    // V3.1.1 红线：不设置 idleTimeoutMs 就是不限制，不存在任何隐藏的 30/60/120/300s timer。
+    // 模块层只保留 STREAM_FIRST_BYTE_TIMEOUT_MS（首字节仅提示，不终止请求）。
+    const mod = streamingModule as unknown as Record<string, unknown>;
+    const timeoutKeys = Object.keys(mod).filter(
+      (k) => /TIMEOUT/i.test(k) && k !== 'STREAM_FIRST_BYTE_TIMEOUT_MS',
+    );
+    expect(timeoutKeys).toEqual([]);
   });
 });
 

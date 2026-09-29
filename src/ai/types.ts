@@ -79,28 +79,29 @@ export interface AnalyzeRequest {
    */
   requestType?: AIRequestType;
   /**
-   * V3.0.2：外部中止信号（用户取消 / probe_guarded 联动 Abort Main）。
+   * V3.0.2：外部中止信号（用户取消 / 暂停 / 真实断连联动）。
    * adapter 必须把它与内部看门狗 AbortController 关联；外部中止优先。
+   *
+   * V3.1.1：Probe **没有任何资格** abort Main —— 汇入本通道的只有
+   * 用户主动操作（取消 / 暂停）与真实外部事件。
    */
   signal?: AbortSignal;
   /**
-   * V3.0.2：关闭 BiliScope 人为的「非流式总时长 timeout」。
-   * probe_guarded（探针已 healthy）与 AI Test Mode 下为 true：
-   * 请求只由 Provider 正常完成 / 明确错误 / 真实断连 / 外部中止来结束。
-   * 流式链路本就无总时长限制（仅空闲看门狗），此标志对流式无副作用。
+   * @deprecated V3.1.1：总时长/空闲计时统一由 `idleTimeoutMs` 决定
+   * （`number` = 计时上限；`null`/`undefined` = 不限制）。本字段已不再被读取。
    */
   noTotalTimeout?: boolean;
   /**
-   * V3.1.0 · P0（AI 时长放宽）：流式**空闲上限**（同时作为非流式 fallback 总超时）。
+   * V3.1.1 · P0（时长策略）：流式**空闲上限**（同时作为非流式总时长上限）。
    *
-   * 优先级与语义：
-   *  - `undefined`（不传）= 默认 `DEFAULT_IDLE_TIMEOUT_MS`（300s）；
-   *  - `number`           = 指定毫秒（UI 选项 60/120/180/300s）；
-   *  - `null`             = **不限制**：不创建空闲 timer / 非流式总时长 timer，
-   *    请求只由 Provider 完成 / 明确错误 / 真实断连 / 外部中止结束。
+   * 语义（二态，默认不限制）：
+   *  - `number`           = 计时上限毫秒（UI 选项 60/120/180/300/600/900/1800s）；
+   *  - `null` / `undefined` = **不限制**：不创建任何 BiliScope 人为 timer，
+   *    请求只由 Provider 完成 / 明确错误 / 真实断连 / 用户暂停或取消结束。
    *
-   * ⚠️ 红线：`null` ≠ 删除中止能力 —— AbortController 与外部 `signal`
+   * ⚠️ 红线一：不限制 ≠ 删除中止能力 —— AbortController 与外部 `signal`
    * 照常工作，真实断连仍必须失败。AI Test Mode 传 null。
+   * ⚠️ 红线二：不再存在任何隐藏的 30/60/120s 默认 timer —— 不设置就是不限制。
    */
   idleTimeoutMs?: number | null;
   /**
@@ -131,11 +132,11 @@ export interface AnalyzeRequest {
 export type AIRequestType = 'analysis' | 'probe';
 
 /**
- * V3.0.2 · 第四节：AI 请求策略。
- *  - `single`        ：仅发一次正式分析请求（V3.0.1 行为）
- *  - `probe_guarded` ：**并行**发 Probe（轻）+ Main（完整分析）；
- *                      Probe 30s 无响应 → 终止两者 → `REQUEST_PROBE_TIMEOUT`；
- *                      Probe 成功 → 取消 BiliScope 人为总时长限制。
+ * AI 请求策略。
+ *  - `single`        ：仅发一次正式分析请求（不发探针）
+ *  - `probe_guarded` ：**并行**发 Probe（轻，旁路诊断）+ Main（完整分析）；
+ *                      V3.1.1 起 Probe 只诊断不干预 —— 任何探针结果
+ *                      都不终止 Main、不影响 Main 成败。
  */
 export type AIRequestStrategy = 'single' | 'probe_guarded';
 
@@ -150,7 +151,13 @@ export type AIRequestStrategy = 'single' | 'probe_guarded';
  * V3.0.2 扩展 `phase`：探针阶段（`probe_*`）由 probe_guarded 模式产生。
  */
 export interface StreamProgress {
-  phase: 'waiting_first_byte' | 'streaming' | 'probe_pending' | 'probe_ready' | 'probe_failed';
+  phase:
+    | 'waiting_first_byte'
+    | 'streaming'
+    | 'probe_pending'
+    | 'probe_ready'
+    | 'probe_failed'
+    | 'probe_timeout';
   /**
    * 从请求发出到现在的毫秒数。
    * V3.0.2：probe_* 阶段没有流字段 —— 以下 4 个流字段仅在 waiting_first_byte / streaming 阶段有意义
@@ -165,23 +172,52 @@ export interface StreamProgress {
   chunkCount?: number;
   /** V3.0.2：探针耗时（仅 probe_* 阶段有值） */
   probeLatencyMs?: number;
+  /**
+   * V3.1.1：探针诊断状态与详情（仅 probe_* 阶段有值）。
+   * UI 用它显示独立的「探针：…」状态行 —— 探针异常**不改变** Main 的独立显示。
+   */
+  probeStatus?: ProbeStatus;
+  /** V3.1.1：探针诊断详情（如 `HTTP 401` / `连接成功但没有可用模型输出`） */
+  probeDetail?: string;
 }
 
 /**
- * V3.0.2 · Probe（探针）结果 —— **仅审计，不产生业务结果**。
+ * V3.1.1 · Probe 诊断状态（与 Main 互不决定业务结果）。
+ *  - `pending`  ：探针尚未落定
+ *  - `healthy`  ：HTTP 2xx 且有模型文本
+ *  - `warning`  ：HTTP 2xx 但空响应（连接成功、模型没说话）—— 仅诊断警告，**不是**失败
+ *  - `timeout`  ：30s 观察窗内无响应（Probe 自己结束，**不波及** Main）
+ *  - `failed`   ：HTTP 4xx/5xx / 网络错误 / 解析错误 —— 仅诊断，**不波及** Main
+ *  - `skipped`  ：single 策略未发探针
+ */
+export type ProbeStatus = 'pending' | 'healthy' | 'warning' | 'timeout' | 'failed' | 'skipped';
+
+/**
+ * V3.0.2 · Probe（探针）结果 —— **旁路诊断**（V3.1.1 语义），不产生业务结果。
  *
- * Probe 的唯一目的：确认 Provider 网络可达 / API Key 有效 / 模型开始响应。
- * 它**不分析评论**，也**不计入评论分析的 token 成本**。
+ * V3.1.1 核心变更：Probe 从「Main 看门人」降级为「Provider 连通性观察器」：
+ *  - `transportConnected`：HTTP 层是否成功收到响应（2xx 即 true，**包括空响应**）；
+ *  - `modelResponded`：响应体是否有模型文本；
+ *  - 空响应 → `status='warning'`（连接成功但没有可用模型输出），**不是** OUTPUT_EMPTY；
+ *  - Probe 的任何失败（401/429/500/网络/空/超时）都只进入本对象与 UI 诊断，
+ *    **绝不** abort Main、**绝不**改写 Main 的成败。
  */
 export interface ProbeResult {
+  /** transport 请求是否成功完成（2xx = true，含空响应；false 仅限 HTTP/网络/解析错误与超时） */
   ok: boolean;
+  /** V3.1.1：诊断状态 */
+  status: ProbeStatus;
+  /** V3.1.1：HTTP 连接是否成功（2xx） */
+  transportConnected: boolean;
+  /** V3.1.1：模型是否返回了文本 */
+  modelResponded: boolean;
   /** 探针耗时（ms） */
   latencyMs: number;
   /** HTTP 状态码（若已到达） */
   httpStatus?: number;
   /** Provider/模型返回的简短文本（截断保存） */
   text?: string;
-  /** 失败原因（ok=false 时） */
+  /** 失败/警告原因（status='failed' 时必有；'warning' 时为空响应说明） */
   error?: string;
   /** Provider 返回的请求 ID（有则保存） */
   requestId?: string;

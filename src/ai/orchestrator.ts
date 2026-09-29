@@ -17,11 +17,21 @@
  * V3.0.2（AI 开放测试模式）：
  *  - maxTokens 默认 **Auto**（请求体省略 max_tokens，上限交给 Provider）；
  *    任务级 4096 硬编码（TASK_DEFAULT_MAX_TOKENS）已废除。
- *  - 默认策略 `probe_guarded`：Probe（极轻）与 Main **并行**启动；
- *    Probe 30s 无有效响应 → 终止两者 → REQUEST_PROBE_TIMEOUT；
- *    Probe healthy → Main **没有任何人为总时长限制**（30s/60s/120s 到期强杀已废除），
- *    Main 只由 Provider 完成/明确错误/MAX_TOKENS/真实断连/用户取消结束。
  *  - Probe 是独立审计分区（requestType='probe'），不计入分析 token 成本。
+ *
+ * V3.1.1（Probe 旁路诊断 + AI 暂停恢复）：
+ *  - Probe 从「Main 看门人」降级为**旁路诊断器**：只观察、只诊断、只告诉用户。
+ *    Probe 的任何失败（401/429/5xx/网络/空响应/30s 观察窗超时）都**绝不** abort Main、
+ *    **绝不**改写 Main 成败 —— REQUEST_PROBE_TIMEOUT 与「probe-response-empty →
+ *    OUTPUT_EMPTY」两条 Probe 派生失败路径已删除。
+ *    `Probe FAIL + Main SUCCESS = AI 分析成功（探针存在警告）` 是合法且必须正确呈现的状态。
+ *  - Main Request 冻结：baseRequest 构造后即计算 requestFingerprintBefore，
+ *    Main 落定后重算 requestFingerprintAfter；两者必须相等（测试强制证明），
+ *    指纹随结果与审计 meta 落库。
+ *  - 暂停/继续：用户暂停（signal abort reason='pause'）→ 返回 REQUEST_PAUSED，
+ *    不写 CommentAnalysis、不留半截审计行；「继续分析」由 UI 复用同一输入快照重发 Main。
+ *  - 计时统一：`idleTimeoutMs = number` 为上限，`null`/`undefined` = 不限制
+ *    （不建任何 BiliScope 人为 timer）；`noTotalTimeout` 已废弃、不再读写。
  */
 
 import { newId } from '@utils/id';
@@ -49,13 +59,14 @@ import {
 } from './failures';
 import {
   buildProbeRequest,
-  isHealthyProbeText,
   linkExternalSignal,
   skippedProbe,
+  summarizeProbeResult,
   PROBE_TIMEOUT_MS,
   PROBE_TIMEOUT_MARKER,
 } from './probe';
 import { DEFAULT_TIMEOUT_MS } from './openai-adapter';
+import { computeRequestFingerprint, type FingerprintFields } from './fingerprint';
 import type {
   AIRequestStrategy,
   AnalyzeRequest,
@@ -104,12 +115,11 @@ export interface OrchestrateOpts {
    */
   maxTokens?: number;
   /**
-   * V3.1.0 · P0-AI 时长放宽：流式空闲超时（连续无新 chunk 才算）。
-   * - `undefined`：默认 300s（`DEFAULT_IDLE_TIMEOUT_MS`）；
-   * - `number`：UI 指定（60/120/180/300s）；
-   * - `null`：**不限制**（不创建 idle timer，但 AbortController 与外部 signal 保留——
-   *   真实断连 / 用户取消仍必须失败，**不得**借 null 删除中止能力）。
-   * 非流式 fallback 的总时长兜底跟随同一选项。
+   * V3.1.1 · 计时二态：`number` = 空闲/总时长上限（UI 档位 60/120/180/300/600/900/1800s）；
+   * `null` / `undefined` = **不限制**（不创建任何 BiliScope 人为 timer —— 默认档）。
+   * 不限制 ≠ 删除中止能力：AbortController 与外部 signal 照常工作，
+   * 真实断连 / 用户暂停或取消 / Provider 自身错误仍必须终止请求。
+   * 非流式 fallback 的总时长上限跟随同一选项。
    */
   idleTimeoutMs?: number | null;
   /** 外部已算好的事实块（评论领域用它做 facts 一致性检查） */
@@ -136,16 +146,15 @@ export interface OrchestrateOpts {
    */
   stream?: boolean;
   /**
-   * V3.0.2：请求策略。
-   * - `probe_guarded`（**默认**）：Probe（极轻）与 Main（完整分析）**并行**启动；
-   *   Probe 30s 无有效响应 → 终止两者 → REQUEST_PROBE_TIMEOUT；
-   *   Probe healthy → Main 无人为总时长限制。
-   * - `single`：V3.0.1 旧行为（不发 Probe，非流式保留总超时兜底）。
+   * 请求策略。
+   * - `probe_guarded`（**默认**）：Probe（极轻诊断）与 Main（完整分析）**并行**启动；
+   *   V3.1.1 起 Probe 仅旁路诊断 —— 任何探针结果都不影响 Main 的请求与成败。
+   * - `single`：不发 Probe（探针未启用）。
    */
   requestStrategy?: AIRequestStrategy;
-  /** V3.0.2：AI Test Mode（关闭 BiliScope 一切人为 token/总时长限制；保留 Provider 自身限制） */
+  /** V3.0.2：AI Test Mode（关闭 BiliScope 一切人为 token/时长限制；保留 Provider 自身限制） */
   testMode?: boolean;
-  /** V3.0.2：外部中止信号（用户取消 → 同时终止 Probe 与 Main） */
+  /** V3.0.2：外部中止信号（用户暂停/取消 → 同时终止 Probe 与 Main；reason='pause' 走暂停通道） */
   signal?: AbortSignal;
   /** V3.0.2：探针看门时长（仅测试注入；生产恒为 PROBE_TIMEOUT_MS = 30s） */
   probeTimeoutMs?: number;
@@ -182,8 +191,10 @@ export interface OrchestrateSuccess {
   durationMs: number;
   /** 输出是否不完整（截断等）；SUCCESS 且 incomplete=true 时不得视为完整分析 */
   incomplete: boolean;
-  /** V3.0.2：Probe 结果（probe_guarded 时存在；UI 显示「Probe 0.8s · Analysis 37.2s」） */
+  /** V3.0.2：Probe 结果（probe_guarded 时存在；V3.1.1 旁路诊断，不影响本结果成败） */
   probe?: ProbeResult;
+  /** V3.1.1：Main 请求指纹（Main 落定后重算值；与 before 相等 = 请求从未被 mutate） */
+  requestFingerprint: string;
 }
 
 /** 强类型失败结果 */
@@ -199,8 +210,10 @@ export interface OrchestrateFailure {
   rawText: string;
   requestCount: number;
   durationMs: number;
-  /** V3.0.2：Probe 结果（probe_guarded 时存在；REQUEST_PROBE_TIMEOUT 时必有失败详情） */
+  /** V3.0.2：Probe 结果（probe_guarded 时存在；V3.1.1 旁路诊断，不影响本结果成败） */
   probe?: ProbeResult;
+  /** V3.1.1：Main 请求指纹（Main 落定后重算值；暂停/继续场景用于验证快照一致） */
+  requestFingerprint?: string;
 }
 
 export type OrchestrateResult = OrchestrateSuccess | OrchestrateFailure;
@@ -366,10 +379,13 @@ function classifyRawFailure(res: AnalyzeResponse): { code: AIFailureCode; detail
 /**
  * 统一 AI 编排入口。
  *
- * V3.0.2 默认 probe_guarded：Probe 与 Main **并行**启动（禁止串行）；
+ * 默认 probe_guarded：Probe 与 Main **并行**启动（禁止串行）；
  * 最多发起 **2 次**分析请求（不含 Probe）：
  *   第 1 次 = 正常结构化输出
  *   第 2 次 = 仅在「无效 JSON」或「schema 不符」时，做**一次**修复（不重新分析）
+ *
+ * V3.1.1：Probe 只旁路诊断；Main 的成败只由 Main 自己决定
+ * （Provider 完成 / 明确错误 / MAX_TOKENS / 真实断连 / 用户暂停或取消）。
  */
 export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateResult> {
   const started = performance.now();
@@ -406,17 +422,14 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
   const openTestMode = opts.testMode === true;
   const probeTimeoutMs = opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
 
-  // V3.0.2：probe_guarded（Probe healthy 后）与 AI Test Mode 下，Main 非流式请求
-  // **不设** BiliScope 人为总时长 timer（30s/60s/120s 到期强杀已被废除）；
-  // 流式请求本就没有总时长限制。`single` 策略保留 V3.0.1 的总超时兜底。
-  const noTotalTimeout = strategy === 'probe_guarded' || openTestMode ? true : undefined;
-
-  // V3.1.0 · P0-AI 时长放宽：Test Mode 是**全局硬开关**——一切人为时长限制都关闭，
-  // 空闲超时同样强制「不限制」（null），不依赖 UI 记得传参。
-  // 非 Test Mode 时透传 UI 选择（undefined=默认 300s / number=指定 / null=不限制）。
+  // V3.1.1 · 计时二态：Test Mode 是全局硬开关（强制不限制）；非 Test Mode 透传 UI 选择。
+  // `null` / `undefined` 都表示**不限制**（adapter 不建任何 BiliScope 人为 timer）；
+  // `number` 是用户显式选择的空闲/总时长上限。不存在任何隐藏默认 timer。
+  // （旧 `noTotalTimeout` 已废弃：不再计算、不再下传。）
   const idleTimeoutMs = openTestMode ? null : opts.idleTimeoutMs;
 
-  // Main 的中止通道：用户取消（opts.signal）与 probe_guarded 看门联动都汇入这里。
+  // Main 的中止通道：**只有**用户主动操作（暂停 / 取消）与真实外部事件汇入这里。
+  // V3.1.1：Probe 没有任何资格 abort Main（旁路诊断）。
   const mainAbort = new AbortController();
   const unlinkUserFromMain = linkExternalSignal(opts.signal, mainAbort);
 
@@ -435,30 +448,48 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
     // V3.0.1 · P0-A：流式开关与进度回调（透传到 adapter）
     stream: opts.stream,
     onProgress: opts.onProgress,
-    // V3.1.0 · P0-AI 时长放宽：流式空闲超时（undefined=默认 300s / number=指定 / null=不限制；
+    // V3.1.1：流式空闲/总时长上限（number=上限；null/undefined=不限制；
     // Test Mode 下已归一为 null）
     idleTimeoutMs,
-    // V3.0.2：请求语义类型 / 外部中止 / 人为总时长开关
+    // V3.1.1：请求语义类型 / 外部中止（noTotalTimeout 已废弃 —— 计时统一由 idleTimeoutMs 决定）
     requestType: 'analysis',
     signal: mainAbort.signal,
-    noTotalTimeout,
   };
+
+  // ── 1.5 Main Request 冻结（V3.1.1 · P0）：请求发出前计算指纹 ──
+  // 快照字段手工摘取（request 上挂着 signal/onProgress 函数，不可整体序列化）。
+  // Main 落定后重算 fingerprintAfter；两者相等证明 Probe / 修复流程从未 mutate Main 请求。
+  const fingerprintFields: FingerprintFields = {
+    systemPrompt: baseRequest.systemPrompt,
+    userPrompt: baseRequest.userPrompt,
+    temperature: baseRequest.temperature,
+    maxTokens: baseRequest.maxTokens,
+    structuredOutput: baseRequest.structuredOutput,
+    jsonSchemaName: jsonSchema.name,
+    stream: baseRequest.stream,
+    idleTimeoutMs,
+    provider: preCfg.name,
+    model: preCfg.model,
+  };
+  const fingerprintBefore = await computeRequestFingerprint(fingerprintFields);
 
   // ── 2. 第 1 次请求（probe_guarded：Probe 与 Main **并行**启动，禁止串行） ──
 
-  // Probe 基础设施（仅 probe_guarded 创建；single 保持 V3.0.1 行为、不发 Probe）
+  // Probe 基础设施（仅 probe_guarded 创建；single 不发 Probe）
+  // V3.1.1：Probe = 旁路诊断器。它有自己的观察窗；到期只终止 **Probe 自己**
+  //（status='timeout'），Main 继续 —— V3.0.2 的「看门 → 双杀」已删除。
   let probeAbort: AbortController | undefined;
   let probeTask: Promise<ProbeResult> | undefined;
   let probeResult: ProbeResult | undefined;
   let probeTimer: ReturnType<typeof setTimeout> | undefined;
 
   if (strategy === 'probe_guarded') {
-    // V3.0.2：真实阶段 1 —— 「启动 Provider 探针…」（UI 不显示虚假百分比）
+    // 真实阶段 1 —— 「启动 Provider 探针…」（UI 不显示虚假百分比）
     opts.onProgress?.({ phase: 'probe_pending' });
     probeAbort = new AbortController();
     const unlinkUserFromProbe = linkExternalSignal(opts.signal, probeAbort);
     void unlinkUserFromProbe; // 生命周期与 probeTask 一致，页面级会话无需显式 unlink
-    // 看门：probeTimeoutMs 内 Probe 无有效响应 → 终止 Probe（并联动终止 Main）
+    // Probe 自己的观察窗：到期只结束 Probe，Main 照常运行
     probeTimer = setTimeout(() => probeAbort?.abort(PROBE_TIMEOUT_MARKER), probeTimeoutMs);
 
     probeTask = (async (): Promise<ProbeResult> => {
@@ -473,82 +504,87 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
           request: buildProbeRequest({ signal: probeAbort?.signal }),
           audit: { attempt: 0, requestCount: 0, requestType: 'probe', status: 'probe_ok' },
         });
-        const healthy = isHealthyProbeText(pr.response.text);
-        return {
-          ok: healthy,
-          latencyMs: Math.round(performance.now() - pStart),
+        // V3.1.1：HTTP 2xx = transport 成功（**含空响应**）；
+        // 有文本 → healthy，无文本 → warning（诊断警告，不是 OUTPUT_EMPTY）
+        return summarizeProbeResult({
+          timedOut: false,
           httpStatus: 200,
           text: pr.response.text,
+          latencyMs: Math.round(performance.now() - pStart),
           requestId: pr.response.responseId,
           tokenUsage: pr.response.tokenUsage,
-          error: healthy ? undefined : 'probe-response-empty',
-        };
+        });
       } catch (e) {
-        // 看门超时 / 主动取消 / 真实失败：用 abort reason 如实区分，绝不混为一谈
+        // 观察窗超时 / 主动取消 / 真实失败：用 abort reason 如实区分，绝不混为一谈
         const reason = probeAbort?.signal.reason;
         const timedOut = reason === PROBE_TIMEOUT_MARKER;
         const cancelled = reason === 'main-completed' || opts.signal?.aborted === true;
-        const error = timedOut
-          ? PROBE_TIMEOUT_MARKER
-          : cancelled && typeof reason === 'string'
-            ? reason
-            : e instanceof Error
-              ? e.message
-              : String(e);
-        // V3.0.2：Probe 失败也必须留下独立审计行（规格：Probe 记录 provider/model/latency/success）；
-        // 「主动取消」（main 先完成 / 用户取消）不算失败，不留行。
-        if (!cancelled) {
-          try {
-            const probeReq = buildProbeRequest();
-            await aiAnalysisRepo.add({
-              id: newId('ai'),
-              type: domain,
-              targetId: opts.targetId,
-              provider: preCfg.name,
-              model: preCfg.model,
-              requestType: 'probe',
-              systemPrompt: probeReq.systemPrompt,
-              userPrompt: probeReq.userPrompt,
-              parsedResult: {
-                __meta: {
-                  requestType: 'probe',
-                  status: 'probe_failed',
-                  probeSuccess: false,
-                  error,
-                  probeTimedOut: timedOut,
-                },
-              },
-              durationMs: Math.round(performance.now() - pStart),
-              createdAt: nowIso(),
-            });
-          } catch {
-            /* 失败审计落库失败不影响主流程 */
-          }
+        const latencyMs = Math.round(performance.now() - pStart);
+        // 主动取消（Main 先完成 / 用户暂停或取消）：Probe 未完成观察，
+        // 不算诊断失败、不留审计行 —— 记为 skipped，诊断语义为「未参与」。
+        if (cancelled) {
+          return {
+            ok: false,
+            status: 'skipped',
+            transportConnected: false,
+            modelResponded: false,
+            latencyMs,
+            error: typeof reason === 'string' ? reason : 'user-cancelled',
+          };
         }
-        return {
-          ok: false,
-          latencyMs: Math.round(performance.now() - pStart),
-          error,
-        };
+        const errorMessage = timedOut ? undefined : e instanceof Error ? e.message : String(e);
+        // Probe 失败/超时留下独立审计行（requestType='probe'，不污染分析分区）
+        try {
+          const probeReq = buildProbeRequest();
+          await aiAnalysisRepo.add({
+            id: newId('ai'),
+            type: domain,
+            targetId: opts.targetId,
+            provider: preCfg.name,
+            model: preCfg.model,
+            requestType: 'probe',
+            systemPrompt: probeReq.systemPrompt,
+            userPrompt: probeReq.userPrompt,
+            parsedResult: {
+              __meta: {
+                requestType: 'probe',
+                status: timedOut ? 'probe_timeout' : 'probe_failed',
+                probeSuccess: false,
+                error: timedOut ? PROBE_TIMEOUT_MARKER : errorMessage,
+                probeTimedOut: timedOut,
+              },
+            },
+            durationMs: latencyMs,
+            createdAt: nowIso(),
+          });
+        } catch {
+          /* 失败审计落库失败不影响主流程 */
+        }
+        return summarizeProbeResult({ timedOut, errorMessage, latencyMs });
       } finally {
-        // Probe 落定即拆除看门：healthy 后 Main 完全交由 Provider 主导（无人为总时长限制）
+        // Probe 落定即拆除观察窗（无论结果如何都不影响 Main）
         clearTimeout(probeTimer);
       }
     })();
 
-    // 看门联动：Probe 失败（真实失败或 30s 超时）→ 立即终止 Main。
-    // （'main-completed' 是 Main 先完成后对 Probe 的主动取消，不是失败信号。）
+    // V3.1.1：Probe 落定 → 只推送 UI 诊断状态，**绝不** abort Main、**绝不**改写 Main 成败。
     void probeTask.then((p) => {
       if (probeResult !== undefined) return;
       probeResult = p;
-      // V3.0.2：真实阶段 2 —— Probe 已响应 / Probe 失败（UI 显示「Probe 0.8s」）
-      opts.onProgress?.({ phase: p.ok ? 'probe_ready' : 'probe_failed', probeLatencyMs: p.latencyMs });
-      if (!p.ok && p.error !== 'main-completed' && opts.signal?.aborted !== true) {
-        mainAbort.abort(PROBE_TIMEOUT_MARKER);
-      }
+      opts.onProgress?.({
+        phase:
+          p.status === 'healthy'
+            ? 'probe_ready'
+            : p.status === 'timeout'
+              ? 'probe_timeout'
+              : 'probe_failed',
+        probeLatencyMs: p.latencyMs,
+        probeStatus: p.status,
+        probeDetail: p.error,
+      });
     });
   } else {
-    // single 策略：V3.0.1 行为 —— 不发 Probe
+    // single 策略：不发 Probe（诊断显示「探针：未启用」）
     probeResult = skippedProbe();
   }
 
@@ -565,7 +601,8 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
   let first: AttemptOutcome;
   try {
     first = await mainTask;
-    // Main 正常完成：若 Probe 仍在跑（比 Main 还慢），主动取消，不再等待看门到期
+    // Main 正常完成：若 Probe 仍在跑（比 Main 还慢），主动取消探针
+    //（纯资源回收 —— V3.1.1：这绝不影响 Main 的结果）
     if (probeTask && probeResult === undefined) {
       probeAbort?.abort('main-completed');
       await probeTask
@@ -575,8 +612,8 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
         .catch(() => undefined);
     }
   } catch (e) {
-    // ── Main 失败 / 被看门终止 ──
-    // 1) 先等 Probe 落定（最多到看门到期），用于如实区分死因
+    // ── Main 失败 / 被用户终止（V3.1.1：Probe 的任何结果都**不会**成为死因）──
+    // 1) 先等 Probe 落定（旁路诊断只为审计完整；**不参与**死因判定）
     if (probeTask && probeResult === undefined) {
       await probeTask
         .then((p) => {
@@ -586,8 +623,28 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
     }
     const durationMs = Math.round(performance.now() - started);
     unlinkUserFromMain();
+    const fingerprintAfter = await computeRequestFingerprint(fingerprintFields);
 
-    // 2) 用户主动取消：Probe 与 Main 都已被外部信号终止 —— 如实报告，绝不伪装成超时
+    // 2) 用户暂停（abort reason='pause'）→ PAUSED 通道：
+    //    不写 CommentAnalysis、不留半截审计行；输入快照由 UI 保留，
+    //    「继续分析」复用同一快照重发 Main（绝不重新采集 / 重排 sample / 偷改参数）。
+    if (opts.signal?.aborted && opts.signal.reason === 'pause') {
+      return {
+        ok: false,
+        status: 'REQUEST_PAUSED',
+        message: '已暂停：AI 分析已暂停，输入快照已保留，可点击「继续分析」恢复',
+        retryable: false,
+        detail: 'user-paused',
+        auditId: null,
+        rawText: '',
+        requestCount: 1,
+        durationMs,
+        requestFingerprint: fingerprintAfter,
+        probe: probeResult,
+      };
+    }
+
+    // 3) 用户主动取消：如实报告，绝不伪装成超时或探针失败
     if (opts.signal?.aborted) {
       return {
         ok: false,
@@ -599,62 +656,14 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
         rawText: '',
         requestCount: 1,
         durationMs,
+        requestFingerprint: fingerprintAfter,
         probe: probeResult,
       };
     }
 
-    // 3) 看门超时：Probe 30s 内无有效响应 → REQUEST_PROBE_TIMEOUT
-    //    （绝不显示「AI 请求超时」—— 这是 probe_guarded 专属失败码）
-    if (probeResult && !probeResult.ok && probeResult.error === PROBE_TIMEOUT_MARKER) {
-      const info = describeFailure('REQUEST_PROBE_TIMEOUT');
-      return {
-        ok: false,
-        status: 'REQUEST_PROBE_TIMEOUT',
-        message: info.message,
-        retryable: info.retryable,
-        detail: `探针等待 ${probeResult.latencyMs}ms 无有效响应，已同时终止 Probe 与 Main`,
-        auditId: null,
-        rawText: '',
-        requestCount: 1,
-        durationMs,
-        probe: probeResult,
-      };
-    }
-
-    // 4) Probe 真实失败（非超时；如探针即遇 401/429/5xx/空响应）→ 以探针错误分类上报
-    if (probeResult && !probeResult.ok && probeResult.error !== 'skipped') {
-      if (probeResult.error === 'probe-response-empty') {
-        const info = describeFailure('OUTPUT_EMPTY');
-        return {
-          ok: false,
-          status: 'OUTPUT_EMPTY',
-          message: `探针异常：${info.message}`,
-          retryable: info.retryable,
-          detail: '探针收到 HTTP 200 但无有效文本',
-          auditId: null,
-          rawText: '',
-          requestCount: 1,
-          durationMs,
-          probe: probeResult,
-        };
-      }
-      const info = classifyRequestError(new Error(probeResult.error ?? 'probe failed'), probeTimeoutMs);
-      return {
-        ok: false,
-        status: info.code,
-        message: `探针失败：${info.message}`,
-        retryable: info.retryable,
-        detail: probeResult.error,
-        auditId: null,
-        rawText: '',
-        requestCount: 1,
-        durationMs,
-        probe: probeResult,
-      };
-    }
-
-    // 5) Main 自身真实失败（Probe 仍 healthy / 未启用）→ V3.0.1 分类逻辑
-    //    V3.0.1 · P0-4：把异常**分类**为具体失败码（超时/限流/上下文过大/网络/HTTP/输出超限）
+    // 4) Main 自身真实失败 → 分类为具体失败码（超时/限流/上下文过大/网络/HTTP/输出超限）。
+    //    V3.1.1：REQUEST_PROBE_TIMEOUT 与「探针空响应 → OUTPUT_EMPTY」两条
+    //    Probe 派生路径已删除 —— Probe 不再是 Main 的死因。
     const info = classifyRequestError(e, preCfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     return {
       ok: false,
@@ -666,11 +675,16 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       rawText: '',
       requestCount: 1,
       durationMs,
+      requestFingerprint: fingerprintAfter,
       probe: probeResult,
     };
   }
 
   unlinkUserFromMain();
+
+  // ── 2.5 Main 落定 → 重算请求指纹（V3.1.1 · P0：冻结证明）──
+  // before === after 证明 Probe / adapter / 修复流程从未 mutate Main 请求对象。
+  const fingerprintAfter = await computeRequestFingerprint(fingerprintFields);
 
   // ── 3. 不可修复类失败直接返回（拒答 / 截断 / 空输出） ──
   const rawFail = classifyRawFailure(first.response);
@@ -692,6 +706,7 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       rawText: first.response.rawText ?? first.response.text,
       requestCount: 1,
       durationMs: Math.round(performance.now() - started),
+      requestFingerprint: fingerprintAfter,
       probe: probeResult,
     };
   }
@@ -742,16 +757,14 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
           maxTokens,
           structuredOutput: baseRequest.structuredOutput,
           jsonSchema,
-          // 修复请求沿用同一流式策略与进度回调，避免「修复一次就退化成硬超时」
+          // V3.0.2：修复请求沿用同一流式策略与进度回调，避免「修复一次就退化成硬超时」
           stream: opts.stream,
           onProgress: opts.onProgress,
-          // V3.1.0：修复请求沿用 Main 的空闲超时语义（Test Mode 下已归一为 null）
+          // V3.1.1：修复请求沿用 Main 的空闲/总时长语义（number=上限；否则不限制）
           idleTimeoutMs,
-          // V3.0.2：修复请求沿用 Main 的中止通道与总时长语义
-          // （probe_guarded / Test Mode 下同样无人为总时长限制）
+          // V3.1.1：修复请求沿用 Main 的中止通道（noTotalTimeout 已废弃）
           requestType: 'analysis',
           signal: mainAbort.signal,
-          noTotalTimeout,
         },
         auditExtra: { repairedFrom: first.audit.id, repairOf: firstFailureCode },
         attempt: 2,
@@ -796,6 +809,7 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       rawText: usedResponse.rawText ?? usedResponse.text,
       requestCount,
       durationMs: Math.round(performance.now() - started),
+      requestFingerprint: fingerprintAfter,
       probe: probeResult,
     };
   }
@@ -839,14 +853,19 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
             requestCount,
             citations: citations as unknown as Record<string, unknown>,
             domainRecordId,
-            // V3.0.2：Probe 分区审计 —— Probe 的 token **不计入**分析成本，
-            // 仅供 UI 显示「Probe 0.8s · Analysis 37.2s」与事后排障。
+            // V3.1.1：Main 请求指纹（before/after 必须相等 —— 请求从未被 mutate）
+            requestFingerprintBefore: fingerprintBefore,
+            requestFingerprintAfter: fingerprintAfter,
+            // Probe 分区审计（token 不计入分析成本）。V3.1.1：旁路诊断三态
+            // （status/transportConnected/modelResponded）+ 诊断详情；不影响 SUCCESS。
             probe: probeResult
               ? {
                   requestType: 'probe' as const,
                   provider: preCfg.name,
                   model: preCfg.model,
-                  success: probeResult.ok,
+                  status: probeResult.status,
+                  transportConnected: probeResult.transportConnected,
+                  modelResponded: probeResult.modelResponded,
                   latencyMs: probeResult.latencyMs,
                   httpStatus: probeResult.httpStatus,
                   requestId: probeResult.requestId,
@@ -874,6 +893,7 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
     durationMs,
     incomplete: false,
     probe: probeResult,
+    requestFingerprint: fingerprintAfter,
   };
 }
 
@@ -892,17 +912,17 @@ export async function orchestrateCommentAnalysis(opts: {
   citationMap: Record<string, string>;
   provider?: ProviderName;
   maxTokens?: number;
-  /** V3.1.0：流式空闲超时（undefined=默认 300s / number=指定 / null=不限制） */
+  /** V3.1.1：空闲/总时长上限（number=上限；null/undefined=不限制 —— 默认） */
   idleTimeoutMs?: number | null;
   /** V3.0.1 · P0-A：流式进度回调（UI 显示「已接收 XX 字符」） */
   onProgress?: (info: StreamProgress) => void;
   /** V3.0.1 · P0-A：是否强制流式（不传则按 provider 能力） */
   stream?: boolean;
-  /** V3.0.2：请求策略（默认 probe_guarded：Probe+Main 并行，30s 看门） */
+  /** 请求策略（默认 probe_guarded：Probe 旁路诊断 + Main 并行，互不决定成败） */
   requestStrategy?: AIRequestStrategy;
-  /** V3.0.2：AI Test Mode（关闭 BiliScope 一切人为 token/总时长限制） */
+  /** V3.0.2：AI Test Mode（关闭 BiliScope 一切人为 token/时长限制） */
   testMode?: boolean;
-  /** V3.0.2：外部中止信号（用户取消 → 同时终止 Probe 与 Main） */
+  /** V3.0.2：外部中止信号（用户暂停 reason='pause' / 取消 → 同时终止 Probe 与 Main） */
   signal?: AbortSignal;
 }): Promise<OrchestrateResult> {
   return orchestrate({

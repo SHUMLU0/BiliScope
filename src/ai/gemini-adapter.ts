@@ -19,9 +19,7 @@
 
 import { logger } from '@utils/logger';
 import { linkExternalSignal } from './probe';
-import { DEFAULT_TIMEOUT_MS } from './openai-adapter';
 import {
-  DEFAULT_IDLE_TIMEOUT_MS,
   consumeSseStream,
   parseSseDataLines,
 } from './streaming';
@@ -197,10 +195,10 @@ export class GeminiAdapter implements AIProvider {
     let receivedChars = 0;
     let timedOut = false;
 
-    // V3.1.0 · P0：空闲上限请求级参数化（undefined=默认 300s / number=指定 / null=不限制）。
-    // null ≠ 删除中止能力：AbortController 与外部 signal 照常工作。
-    const idleLimitMs: number | null =
-      req.idleTimeoutMs === null ? null : (req.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS);
+    // V3.1.1 · P0（时长策略）：计时统一规则 —— `number` = 上限；
+    // `null`/`undefined` = **不限制**（不设空闲 timer）。不再有隐藏的 300s 默认。
+    // 不限制 ≠ 删除中止能力：AbortController 与外部 signal 照常工作。
+    const idleLimitMs: number | null = typeof req.idleTimeoutMs === 'number' ? req.idleTimeoutMs : null;
 
     const watchdog = setInterval(() => {
       const now = performance.now();
@@ -337,16 +335,12 @@ export class GeminiAdapter implements AIProvider {
 
     const sendNonStreaming = async (m: StructuredOutputMode): Promise<GeminiResp> => {
       const ctrl = new AbortController();
-      // V3.0.2：外部中止优先；noTotalTimeout（probe healthy / Test Mode）时不设人为总时长 timer
-      // V3.1.0：idleTimeoutMs === null（用户选择「不限制」）同样不设总时长 timer；
-      //         但 AbortController 与外部 signal 链接保留——真实断连/用户取消仍必须失败。
+      // V3.1.1：总时长计时统一由 `idleTimeoutMs` 决定 —— `number` = 上限；
+      // `null`/`undefined`（不限制 / Test Mode / 未设置）→ 不设人为总时长 timer。
+      // AbortController 与外部 signal 链接保留——真实断连/用户取消或暂停仍必须失败。
       const unlink = linkExternalSignal(req.signal, ctrl);
-      const noTotal = req.noTotalTimeout === true || req.idleTimeoutMs === null;
-      const timeoutMs =
-        typeof req.idleTimeoutMs === 'number'
-          ? req.idleTimeoutMs
-          : (this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-      const timer = noTotal ? null : setTimeout(() => ctrl.abort(), timeoutMs);
+      const totalMs = typeof req.idleTimeoutMs === 'number' ? req.idleTimeoutMs : null;
+      const timer = totalMs === null ? null : setTimeout(() => ctrl.abort(), totalMs);
       try {
         const res = await fetch(this.url(false), {
           method: 'POST',

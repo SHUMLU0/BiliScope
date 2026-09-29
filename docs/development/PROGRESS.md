@@ -1,7 +1,29 @@
-# BiliScope V3.1.0 进度表
+# BiliScope V3.1.1 进度表
 
 > 唯一进度表（Single Source of Truth）。
 > 状态：✅ 完成 / 🔄 进行中 / ⏸ 阻塞 / ⬜ 未开始
+
+---
+
+## V3.1.1 「Probe 旁路诊断 + AI 暂停恢复」
+
+> 定位：把探针从 Main 的看门人降级为纯诊断通道，把「中断」升级为可恢复的暂停，把请求冻结为不可变指纹。
+> **探针失败不拖累主分析；请求一旦构造就冻结；时长默认不设限，控制权在人。**
+> 不重写采集层 / CommentCollector / WBI / Dexie，不删历史数据与历史审计。
+
+| 编号 | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **P0-A** | Probe 旁路诊断化 | ✅ | 删除「看门 30s 双杀」与「Probe !ok → abort Main」；30s 只是 Probe 观察窗（超时 → probe_timeout 留审计行，Main 继续）；2xx 即 `transportConnected=true`（含空响应）；空响应 = warning；`OUTPUT_EMPTY` 只允许 Main 判定；`Probe FAIL + Main SUCCESS = 成功（带警告）`；`REQUEST_PROBE_TIMEOUT` 废弃；`PROBE-001..008` |
+| **P0-B** | Main 请求指纹冻结 | ✅ | 不可变快照 + SHA-256 `requestFingerprint`；`fingerprintBefore === fingerprintAfter` 测试证明（含失败与自动修复路径）；指纹随审计落库；`MAIN-001..003` |
+| **P0-C** | 暂停 / 继续分析 | ✅ | 暂停 → `REQUEST_PAUSED`（快照保留 / 不写产品 / 不留半截审计行）；继续 → 复用同一 input snapshot 重发（不重新采集 / 不重排 / 不偷改参数）；reason='pause' 与无 reason 取消严格区分；`PAUSE-001..005` |
+| **P0-D** | 时间策略 8 档 | ✅ | `不限制（默认）/60/120/180/300/600/900/1800s`；`null/undefined` = 不建 timer；`noTotalTimeout` 废弃；设置损坏值归一 null；`TIME-001..007` |
+| **P1-E** | UI 最小修改 | ✅ | 暂停 / 继续按钮；Probe 与 Main 独立状态行（`describeProbeStatus` 六态）；真实 elapsed / 样本数 / 输出上限 / 时长模式；暂停态快照摘要卡 |
+| **P1-F** | 隐私复核 | ✅ | Probe / Main 双通道零身份（外发语料 + `__meta`）；审计行 `targetId` 为本地归档键不属于外发通道；`PRIVACY-001..004` |
+| **T** | 测试矩阵 | ✅ | 新增 fingerprint / pause 两文件；probes 全量重写；timeout / privacy 扩展；本地全量 **421 passed / 2 skipped（40 文件）** |
+| **D** | 文档同步 | ✅ | SPEC 6.4-6.9 重写为旁路 / 暂停 / 指纹语义；README「Probe 旁路诊断」章节 + 8 档时长 + 版本历程；六处对齐 `3.1.1`；docs-consistency 升级 3.1.1 契约 |
+| **G** | 门禁链 | 🔄 | typecheck / lint / test / build / test:dist / scan-secrets / verify-acceptance → commit → push → CI → tag `v3.1.1` + Release → audit ZIP |
+
+本地已验证（截至文档同步完成）：typecheck EXIT=0；test **421 passed / 2 skipped**（40 文件）。
 
 ---
 

@@ -47,9 +47,16 @@ export const AI_FAILURE_CODES = [
   'NO_PROVIDER',
   /**
    * V3.0.2 · probe_guarded：探针 30s 内没有任何有效响应 → 已终止 Probe 与 Main。
-   * 这是 probe_guarded 策略专属的失败码，绝不与普通总时长超时混用。
+   * V3.1.1 起本码**不再产生**（Probe 已降级为旁路诊断，任何探针结果都不终止 Main）；
+   * 保留枚举仅为历史审计行兼容。
    */
   'REQUEST_PROBE_TIMEOUT',
+  /**
+   * V3.1.1 · P0：用户主动**暂停**（非 Provider 失败）。
+   * Main 已被暂停信号终止、输入快照保留，可「继续分析」复用同一快照重发；
+   * 绝不与取消（REQUEST_FAILED）/ 超时（REQUEST_TIMEOUT）混淆。
+   */
+  'REQUEST_PAUSED',
 ] as const;
 
 export type AIFailureCode = (typeof AI_FAILURE_CODES)[number];
@@ -88,6 +95,7 @@ const MESSAGES: Record<AIFailureCode, string> = {
   OUTPUT_REFUSAL: 'AI 拒绝回答该请求',
   NO_PROVIDER: '未配置 AI Provider',
   REQUEST_PROBE_TIMEOUT: 'Provider 在 30 秒内没有返回探针响应，已取消本次 AI 分析',
+  REQUEST_PAUSED: '已暂停：AI 分析已暂停，输入快照已保留，可点击「继续分析」恢复',
 };
 
 const RETRYABLE: Record<AIFailureCode, boolean> = {
@@ -106,6 +114,7 @@ const RETRYABLE: Record<AIFailureCode, boolean> = {
   OUTPUT_REFUSAL: false,
   NO_PROVIDER: false,
   REQUEST_PROBE_TIMEOUT: true,
+  REQUEST_PAUSED: false,
 };
 
 /** 请求类失败码（由 classifyRequestError 产出） */

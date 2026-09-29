@@ -1,12 +1,55 @@
-# FINAL_AUDIT.md — BiliScope V3.1.0 最终审计
+# FINAL_AUDIT.md — BiliScope V3.1.1 最终审计
 
-> 生成于 2026-09-29 · 当前版本 **V3.1.0**（Research Workspace）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-29 · 当前版本 **V3.1.1**（Probe 旁路诊断 + AI 暂停恢复）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
 >
-> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → V3.0.1 稳定性 / 性能 / UI / 文档维护版 → V3.0.2 AI 开放测试模式 → **V3.1.0 Research Workspace**
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → V3.0.1 稳定性 / 性能 / UI / 文档维护版 → V3.0.2 AI 开放测试模式 → V3.1.0 Research Workspace → **V3.1.1 Probe 旁路诊断 + AI 暂停恢复**
 
 ---
 
-## 0x0. V3.1.0 Research Workspace
+## 0x0. V3.1.1 Probe 旁路诊断 + AI 暂停恢复
+
+> 定位：**把探针降级为纯诊断、把中断升级为可恢复的暂停、把请求冻结为不可变指纹。**
+> 「探针失败不再拖累主分析；请求一旦构造就冻结；时长默认不设限，控制权在人。」
+> **不改**：采集层 / CommentCollector / WBI / Dexie 数据层 / 探针审计分区；**不删**历史数据与历史审计。
+
+### 交付项
+
+| # | 交付 | 实现 | 测试 |
+|---|---|---|---|
+| 1 | Probe 旁路诊断化（P0-A） | 删除「看门 30s → 双杀」与「Probe !ok → abort Main」；30s 只是 Probe 自己的观察窗（超时 → Probe 以 `probe_timeout` 结束留审计行，Main 原样继续）；HTTP 2xx 即 `transportConnected=true`（含空响应）；空响应 = `warning`；真正 `OUTPUT_EMPTY` 只允许 Main 判定；**`Probe FAIL + Main SUCCESS = 分析成功（探针存在警告）`**；`REQUEST_PROBE_TIMEOUT` 废弃不再产生 | `PROBE-001..008` |
+| 2 | Main 请求冻结（P0-B） | baseRequest 构造后不可变快照 + SHA-256 `requestFingerprint`；Main 落定后 `fingerprintBefore === fingerprintAfter` 由测试证明；指纹随审计落库（`requestFingerprintBefore/After`） | `MAIN-001..003` |
+| 3 | 暂停 / 继续分析（P0-C） | 「暂停分析」：Abort Main+Probe → `REQUEST_PAUSED`（retryable=false）、输入快照保留、不写产品结果、不留半截审计行；「继续分析」：复用**完全相同** input snapshot 重发 Main（不重新采集 / 不重排 sample / 不偷改参数）；暂停（reason='pause'）与无 reason 取消严格区分 | `PAUSE-001..005` |
+| 4 | 时间策略 8 档（P0-D） | `不限制（默认）/ 60/120/180/300/600/900/1800 秒`；`idleTimeoutMs = null/undefined` = 不建任何人为 timer；`noTotalTimeout` 废弃不再读写；`ProviderConfig.timeoutMs` 退出计时决策；`DEFAULT_TIMEOUT_MS` 仅作 classifyRequestError 参考值；设置存储损坏值归一 `null` | `TIME-001..007` |
+| 5 | Probe 三态与审计 | `ProbeResult.status ∈ pending/healthy/warning/timeout/failed/skipped`；`summarizeProbeResult()` 优先级归纳；审计回写 `meta.probe` 三态 `status/transportConnected/modelResponded`（替代旧 success 布尔）；探针主动取消（Main 先完成/暂停/取消）→ `skipped` 不留审计行 | `PROBE-006..008` |
+| 6 | 失败分层 16 码 | 新增 `REQUEST_PAUSED`（不可重试）；`REQUEST_PROBE_TIMEOUT` 标记 `@deprecated` 保留枚举兼容旧审计 | — |
+| 7 | UI 最小修改 | 暂停 / 继续按钮、Probe 与 Main 独立状态行、真实 elapsed / 样本数 / 输出上限 / 时长模式展示；暂停态卡片显示快照摘要 | — |
+| 8 | 隐私复核 | Probe / Main 双通道零身份复核（systemPrompt / userPrompt / `__meta` 零 rpid / mid / uname / videoId；审计行 `targetId` 是本地归档键，不属外发通道） | `PRIVACY-001..004` |
+
+### 关键不变量（V3.1.1 后成立）
+
+- V3.1.0 全部不变量继续成立（零身份 prompt、citationMap 只在本地、Auto max_tokens、审计分区、按 id get+put 回写、反幽灵双防线）。
+- **探针绝不影响 Main**：不改请求、不决定成败、不主动 Abort；`REQUEST_PROBE_TIMEOUT` 不再产生。
+- **请求不可 mutate**：`fingerprintBefore === fingerprintAfter`（成功 / 失败 / 自动修复路径全部成立）。
+- **暂停可恢复**：继续分析复用同一快照，两次指纹一致；暂停不写产品结果、不留半截审计行。
+- **默认不限制**：`idleTimeoutMs=null/undefined` 不建任何人为 timer；任何路径无隐藏 30/60/120/300s 强杀；不限制 ≠ 删除中止能力。
+- 版本号六处对齐 `3.1.1`。
+
+### 门禁实测结果（本地，2026-09-29）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| test | `vitest run` | **PASS** 421 passed / 2 skipped / 0 failed（40 文件，较 V3.1.0 基线 403/2 +18 测试 +2 文件） |
+| typecheck | `tsc --noEmit` | PASS（EXIT=0，正控验证） |
+| lint / build / test:dist / scan-secrets / acceptance | 见门禁链章节 | 发布前统一执行（见 #72） |
+
+### 真实性边界（本审计不粉饰）
+
+- Real Provider E2E：依赖使用者本地 API Key，仓库内自动化测试使用 **mock fetch** → 若本地无可用 Provider，报告为 **REAL AI ENVIRONMENT LIMITED**，**不得**当作 `REAL AI PASS`。
+- Chrome E2E：命令行 `--load-extension` 在本机不加载未打包扩展 → **`CHROME_E2E_ENV_LIMITED`**（≠ FAIL）。
+
+---
+
+## 0x1. V3.1.0 Research Workspace
 
 > 定位：**AI 评论数据隐私化 + 研究工作台 UI**。
 > 「真实 ID 留在本地，所有引用可回溯，所有 AI 结果可审计。」

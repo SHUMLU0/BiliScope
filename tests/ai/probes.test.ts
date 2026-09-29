@@ -1,14 +1,15 @@
 /**
- * V3.0.2 · probe_guarded 专项测试（AI-PROBE-001..007）+ Auto 截断语义（AI-LIMIT-004）。
+ * V3.1.1 · Probe 旁路诊断专项测试（PROBE-001..008）+ Auto 截断语义（AI-LIMIT-004）。
  *
- * 规格（AI 开放测试模式）核心断言：
+ * 规格（V3.1.1 任务书）核心断言：
  *  - Probe（极轻，不分析评论）与 Main **并行**启动（禁止串行）
- *  - Probe 30s（测试注入更短）无有效响应 → Abort Main + Probe → REQUEST_PROBE_TIMEOUT
- *  - Probe healthy → Main **没有任何人为总时长限制**（跑多久都不被 BiliScope 强杀）
- *  - Probe 失败不写 CommentAnalysis（零落库）
- *  - Main 成功正常落库；Probe 审计行 requestType='probe' 独立分区
+ *  - Probe 观察窗（30s，测试注入更短）超时 → **只结束 Probe 自己**（status='timeout'），Main 继续
+ *  - Probe 的任何失败（HTTP 401 / 空响应 / 网络）都**绝不** abort Main、**绝不**改写 Main 成败
+ *    → `Probe FAIL + Main SUCCESS = AI 分析成功（探针存在警告）` 是合法状态
+ *  - 探针空响应 = warning（transportConnected=true + modelResponded=false），**不是** OUTPUT_EMPTY
+ *  - Main 成功正常落库；Probe 审计行 requestType='probe' 独立分区；主动取消不留行
  *  - 用户取消 → 同时终止 Probe 与 Main，如实报告「已取消」（绝不伪装成超时）
- *  - 仅真实 MAX_TOKENS finishReason 才是 OUTPUT_TRUNCATED；Auto 模式文案不再提示 BiliScope timeout
+ *  - 仅真实 MAX_TOKENS finishReason 才是 OUTPUT_TRUNCATED；Auto 模式文案不提示 BiliScope timeout
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -81,7 +82,7 @@ interface ProbeMockOpts {
 
 /**
  * probe_guarded 感知 mock：按请求体识别 probe（max_tokens=32 + content 'probe'）与 main，
- * 记录两类请求的发起时间（并行性断言用），并对 main 支持 abort 传播。
+ * 记录两类请求的发起时间（并行性断言用），并对两类请求支持 abort 传播。
  */
 function makeProbeAwareMock(o: ProbeMockOpts): {
   events: Array<{ kind: 'probe' | 'main'; t: number }>;
@@ -113,7 +114,7 @@ function makeProbeAwareMock(o: ProbeMockOpts): {
     const signal = init?.signal;
 
     return new Promise<Response>((resolve, reject) => {
-      // abort 传播：外部看门/取消必须能杀死挂起的 fetch（真实网络行为）
+      // abort 传播：外部中止必须能杀死挂起的 fetch（真实网络行为）
       const onAbort = (): void => {
         if (kind === 'probe') aborted.probe = true;
         else aborted.main = true;
@@ -126,7 +127,7 @@ function makeProbeAwareMock(o: ProbeMockOpts): {
       }
 
       if (kind === 'probe') {
-        if (o.probe === 'hang') return; // 永不 resolve（等看门 abort）
+        if (o.probe === 'hang') return; // 永不 resolve（等观察窗 abort）
         const delay = o.probeDelayMs ?? 0;
         setTimeout(() => {
           if (o.probe === 'reject401') {
@@ -141,7 +142,7 @@ function makeProbeAwareMock(o: ProbeMockOpts): {
       }
 
       // main
-      if (o.mainHang) return; // 永不 resolve（等看门/用户 abort）
+      if (o.mainHang) return; // 永不 resolve（等用户暂停/取消 abort）
       const delay = o.mainDelayMs ?? 0;
       setTimeout(() => {
         resolve(openAiResponse(o.mainContent ?? GOOD_JSON, o.mainFinish ?? 'stop', [10, 20, 30]));
@@ -157,8 +158,8 @@ beforeEach(async () => {
   await clearAll();
 });
 
-describe('V3.0.2 · probe_guarded（AI-PROBE）', () => {
-  it('AI-PROBE-001: Probe 与 Main 并行启动（Main 不等 Probe 完成）', async () => {
+describe('V3.1.1 · Probe 旁路诊断（PROBE-001..008）', () => {
+  it('PROBE-001: Probe 与 Main 并行启动（Main 不等 Probe 完成）', async () => {
     saveCfg();
     const { events, aborted } = makeProbeAwareMock({ probe: 'ok', probeDelayMs: 150, mainDelayMs: 30 });
     const r = await orchestrate(BASE_OPTS);
@@ -172,32 +173,30 @@ describe('V3.0.2 · probe_guarded（AI-PROBE）', () => {
     const probeT = events.find((e) => e.kind === 'probe')!.t;
     const mainT = events.find((e) => e.kind === 'main')!.t;
     expect(Math.abs(mainT - probeT)).toBeLessThan(100);
-    // Main 30ms 先完成 → orchestrate 会对仍在跑的 Probe 主动 abort('main-completed')
-    // （资源回收是设计行为，V3.0.2 orchestrator L529-531）→ aborted.probe 可能为 true。
-    // 真正必须成立的是：Main 本身绝不被任何人为计时器中止。
+    // Main 本身绝不被任何人为计时器中止
     expect(aborted.main).toBe(false);
   });
 
-  it('AI-PROBE-002: Probe 30s（注入 50ms）无响应 → 终止两者 → REQUEST_PROBE_TIMEOUT', async () => {
+  it('PROBE-002: 观察窗超时只杀 Probe 自己（status=timeout），Main 继续并成功', async () => {
     saveCfg();
-    const { aborted } = makeProbeAwareMock({ probe: 'hang', mainHang: true });
+    // probe 挂死 → 50ms 观察窗到期终止 Probe；main 250ms 后正常返回 → 必须 SUCCESS
+    const { aborted } = makeProbeAwareMock({ probe: 'hang', mainDelayMs: 250 });
     const r = await orchestrate({ ...BASE_OPTS, probeTimeoutMs: 50 });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    expect(r.status).toBe('REQUEST_PROBE_TIMEOUT');
-    // 绝不显示成普通超时
-    expect(r.status).not.toBe('REQUEST_TIMEOUT');
-    expect(r.message).toContain('30 秒内没有返回探针响应');
-    // 看门确实杀死了双方
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.status).toBe('SUCCESS');
+    // 探针被观察窗终止（诊断如实记录），但 Main 活到了最后
     expect(aborted.probe).toBe(true);
-    expect(aborted.main).toBe(true);
-    // Probe 失败：不写产品结果
-    expect(await db.commentAnalyses.toArray()).toHaveLength(0);
+    expect(aborted.main).toBe(false);
+    expect(r.probe?.status).toBe('timeout');
+    expect(r.probe?.transportConnected).toBe(false);
+    // 诊断状态独立：绝不因此改写 Main 成败（V3.0.2 的 REQUEST_PROBE_TIMEOUT 已删除）
+    expect(r.status).not.toBe('REQUEST_PROBE_TIMEOUT');
   });
 
-  it('AI-PROBE-003/004: Probe healthy 后 Main 跑再久也不被人为总时长限制终止', async () => {
+  it('PROBE-003: Probe healthy → Main 跑再久也不受任何人为总时长限制', async () => {
     saveCfg();
-    // 看门 50ms 早已到期；Main 故意跑 400ms（等比放大 30/60/120s 场景）→ 仍必须 SUCCESS
+    // 观察窗 50ms 早已到期；Main 故意跑 400ms（等比放大 30/60/120s 场景）→ 仍必须 SUCCESS
     const { events } = makeProbeAwareMock({ probe: 'ok', probeDelayMs: 10, mainDelayMs: 400 });
     const t0 = Date.now();
     const r = await orchestrate({ ...BASE_OPTS, probeTimeoutMs: 50 });
@@ -206,29 +205,57 @@ describe('V3.0.2 · probe_guarded（AI-PROBE）', () => {
     if (!r.ok) return;
     expect(r.status).toBe('SUCCESS');
     expect(wall).toBeGreaterThanOrEqual(400);
-    // Main 未被 50ms「总时长」强杀（V3.0.1 语义下 60s 总 timer 与 50ms 看门都会杀它）
     expect(events.some((e) => e.kind === 'main')).toBe(true);
-    // Probe 分区信息随结果返回
-    expect(r.probe?.ok).toBe(true);
+    // Probe 诊断三态：healthy = 连接成功 + 模型有响应
+    expect(r.probe?.status).toBe('healthy');
+    expect(r.probe?.transportConnected).toBe(true);
+    expect(r.probe?.modelResponded).toBe(true);
     expect(typeof r.probe?.latencyMs).toBe('number');
   });
 
-  it('AI-PROBE-005: Probe 失败（HTTP 401）→ 失败分类上报，不写 CommentAnalysis', async () => {
+  it('PROBE-004: Probe HTTP 401 → Main 照常成功（探针 failed 只进诊断与审计）', async () => {
     saveCfg();
-    // probe 10ms 即 401，main 100ms 才返回 —— 保证 Probe 先落定并联动终止 Main
-    // （旧参数 main 默认 0ms 返回会与 Probe 竞态，Main 先成功 → 误报 SUCCESS）
-    makeProbeAwareMock({ probe: 'reject401', probeDelayMs: 10, mainDelayMs: 100 });
+    // probe 10ms 即 401，main 100ms 返回 —— 旧语义下这里会是整体失败，V3.1.1 必须 SUCCESS
+    const { aborted } = makeProbeAwareMock({ probe: 'reject401', probeDelayMs: 10, mainDelayMs: 100 });
     const r = await orchestrate({ ...BASE_OPTS, probeTimeoutMs: 1000 });
-    expect(r.ok).toBe(false);
-    if (r.ok) return;
-    // 探针的 401 → 请求类失败码（不得是 REQUEST_FAILED 兜底）
-    expect(r.status).toBe('REQUEST_HTTP_ERROR');
-    expect(r.message).toContain('探针失败');
-    // Probe 失败零落库：无产品结果、无 analysis 审计行
-    expect(await db.commentAnalyses.toArray()).toHaveLength(0);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // ★ 核心反转断言：Probe FAIL + Main SUCCESS = AI 分析成功
+    expect(r.status).toBe('SUCCESS');
+    expect(r.domainRecordId).toBeTruthy();
+    expect(await db.commentAnalyses.toArray()).toHaveLength(1);
+    // 探针诊断如实记录失败原因
+    expect(r.probe?.status).toBe('failed');
+    expect(r.probe?.transportConnected).toBe(false);
+    expect(r.probe?.error).toContain('401');
+    // 探针失败绝没有波及 Main
+    expect(aborted.main).toBe(false);
+    // 探针失败留独立审计行（probe_failed），分析行独立存在
+    const audits = await db.aiAnalyses.toArray();
+    const probeRows = audits.filter((a) => a.requestType === 'probe');
+    expect(probeRows).toHaveLength(1);
+    const probeMeta = ((probeRows[0]!.parsedResult as Record<string, unknown>).__meta ?? {}) as Record<
+      string,
+      unknown
+    >;
+    expect(probeMeta.status).toBe('probe_failed');
   });
 
-  it('AI-PROBE-006: Main 成功正常落库；Probe 审计独立分区且不计入分析 token', async () => {
+  it('PROBE-005: Probe 空响应 → warning（连接成功但模型没说话），绝不是 OUTPUT_EMPTY', async () => {
+    saveCfg();
+    makeProbeAwareMock({ probe: 'empty', probeDelayMs: 10, mainDelayMs: 50 });
+    const r = await orchestrate({ ...BASE_OPTS, probeTimeoutMs: 1000 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // ★ 空响应 = 诊断警告，不是分析失败（真正的 OUTPUT_EMPTY 只允许 Main 判定）
+    expect(r.status).toBe('SUCCESS');
+    expect(r.probe?.status).toBe('warning');
+    expect(r.probe?.transportConnected).toBe(true);
+    expect(r.probe?.modelResponded).toBe(false);
+    expect(r.probe?.error).toBe('probe-response-empty');
+  });
+
+  it('PROBE-006: Main 成功正常落库；Probe 审计独立分区且不计入分析 token（三态回写）', async () => {
     saveCfg();
     makeProbeAwareMock({ probe: 'ok', probeDelayMs: 10, mainDelayMs: 10 });
     const r = await orchestrate(BASE_OPTS);
@@ -248,17 +275,26 @@ describe('V3.0.2 · probe_guarded（AI-PROBE）', () => {
     // Probe token 独立记录（mock：probe usage total=2；main usage total=30）—— 绝不合并
     expect(probeRows[0]!.tokenUsage?.total).toBe(2);
     expect(analysisRows[0]!.tokenUsage?.total).toBe(30);
-    // 成功审计回写携带 probe 概要
+    // 成功审计回写携带 Probe 诊断三态（V3.1.1：status/transportConnected/modelResponded）
     const meta = ((analysisRows[0]!.parsedResult as Record<string, unknown>).__meta ?? {}) as Record<
       string,
       unknown
     >;
-    const probeMeta = meta.probe as { requestType?: string; success?: boolean } | undefined;
+    const probeMeta = meta.probe as
+      | {
+          requestType?: string;
+          status?: string;
+          transportConnected?: boolean;
+          modelResponded?: boolean;
+        }
+      | undefined;
     expect(probeMeta?.requestType).toBe('probe');
-    expect(probeMeta?.success).toBe(true);
+    expect(probeMeta?.status).toBe('healthy');
+    expect(probeMeta?.transportConnected).toBe(true);
+    expect(probeMeta?.modelResponded).toBe(true);
   });
 
-  it('AI-PROBE-007: 用户取消 → 同时终止 Probe 与 Main，如实报告「已取消」', async () => {
+  it('PROBE-007: 用户取消 → 同时终止 Probe 与 Main，如实报告「已取消」，探针不留审计行', async () => {
     saveCfg();
     const { aborted } = makeProbeAwareMock({ probe: 'ok', probeDelayMs: 5000, mainHang: true });
     const ctrl = new AbortController();
@@ -276,6 +312,22 @@ describe('V3.0.2 · probe_guarded（AI-PROBE）', () => {
     expect(r.status).not.toBe('REQUEST_PROBE_TIMEOUT');
     expect(aborted.probe).toBe(true);
     expect(aborted.main).toBe(true);
+    // 主动取消：探针不留审计行（零落库）
+    const audits = await db.aiAnalyses.toArray();
+    expect(audits.filter((a) => a.requestType === 'probe')).toHaveLength(0);
+  });
+
+  it('PROBE-008: single 策略不发 Probe，结果带 probe=skipped 诊断标记', async () => {
+    saveCfg();
+    const { events } = makeProbeAwareMock({ probe: 'ok', mainDelayMs: 5 });
+    const r = await orchestrate({ ...BASE_OPTS, requestStrategy: 'single' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(events.some((e) => e.kind === 'probe')).toBe(false);
+    expect(events.some((e) => e.kind === 'main')).toBe(true);
+    expect(r.probe?.status).toBe('skipped');
+    expect(r.probe?.transportConnected).toBe(false);
+    expect(r.probe?.error).toBe('skipped');
   });
 
   it('AI-LIMIT-004: 真实 MAX_TOKENS finishReason → OUTPUT_TRUNCATED（Auto 文案，不提示 BiliScope timeout）', async () => {
@@ -290,17 +342,5 @@ describe('V3.0.2 · probe_guarded（AI-PROBE）', () => {
     expect(r.message).toContain('Auto');
     // 不再把 Provider 的 MAX_TOKENS 说成 BiliScope 超时
     expect(r.message).not.toContain('超时');
-  });
-
-  it('single 策略保持 V3.0.1 行为：不发 Probe，结果仍带 probe=skipped 分区标记', async () => {
-    saveCfg();
-    const { events } = makeProbeAwareMock({ probe: 'ok', mainDelayMs: 5 });
-    const r = await orchestrate({ ...BASE_OPTS, requestStrategy: 'single' });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(events.some((e) => e.kind === 'probe')).toBe(false);
-    expect(events.some((e) => e.kind === 'main')).toBe(true);
-    expect(r.probe?.ok).toBe(false);
-    expect(r.probe?.error).toBe('skipped');
   });
 });

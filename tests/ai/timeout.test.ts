@@ -1,11 +1,13 @@
 /**
- * V3.1.0 · P0-AI 时长放宽 — TIMEOUT-002 / TIMEOUT-003 行为测试。
+ * V3.1.1 · 计时二态（TIME-001..007）—— 延续 V3.1.0 的 TIMEOUT-002/003 行为测试并升级语义。
  *
- * 规格（任务书第 2 节）：
- *  - 流式 idle timeout 选项 60/120/180/300/**不限制**，默认 300s（TIMEOUT-001 常量断言见 streaming.test.ts）；
- *  - AI Test Mode = **不限制**（orchestrator 归一为 null，不依赖 UI 传参）；
- *  - **不得删除 AbortController**：`idleTimeoutMs === null` 只是不建 idle timer，
- *    真实断连 / 用户取消（外部 signal）仍必须让请求失败。
+ * 规格（V3.1.1 任务书 §八）：
+ *  - Main 档位 60/120/180/300/600/900/1800s / 不限制，**默认不限制**（TIME-001/007）；
+ *  - `idleTimeoutMs = number` → 上限生效（TIME-002/006）；`null`/`undefined` → 不限制（TIME-001/003）；
+ *  - **不得删除 AbortController**：null/undefined 只是不建 idle timer，
+ *    真实断连 / 用户暂停或取消（外部 signal）仍必须让请求失败（TIME-004）；
+ *  - Test Mode = 全局硬开关，强制不限制（TIME-005）；
+ *  - 设置层默认不限制，'unlimited'/损坏值 → null（TIME-007）。
  *
  * 时间预算：watchdog tick = 1000ms（openai-adapter 实现），因此「timer 生效」场景
  * 约在 1.0~1.2s 处触发 abort；单测最长 ~1.6s，全部真实 timer（不用 fake timers，
@@ -14,6 +16,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAICompatibleAdapter } from '@ai/openai-adapter';
+import { loadIdleTimeoutAsync, saveIdleTimeout } from '@ai/settings';
 import { clearAll } from '@db/database';
 import { orchestrate } from '@ai/orchestrator';
 import type { CommentAIResult } from '@ai/schemas';
@@ -95,7 +98,23 @@ function sseTimedFetch(schedule: ScheduleStep[]): void {
 
 describe('TIMEOUT-002 · idleTimeoutMs 语义（流式）', () => {
   it(
-    'number 生效：空闲超过指定上限 → watchdog 终止请求（不允许「不限制」幻觉）',
+    'TIME-001: 默认不传 idleTimeoutMs = 不限制（V3.1.1 红线：不存在任何隐藏默认 timer）',
+    async () => {
+      // 不传 idleTimeoutMs → adapter 视为不限制：1400ms 静默后数据到达 → 请求活到成功。
+      // （若仍存在任何隐藏默认 timer，长静默期间 watchdog tick 早已 abort。）
+      sseTimedFetch([
+        { delayMs: 0, payload: oaDelta('{"summary":"') },
+        { delayMs: 1400, payload: oaDelta('长输出"}'), close: true },
+      ]);
+      const a = new OpenAICompatibleAdapter(cfg);
+      const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u' });
+      expect(r.text).toBe('{"summary":"长输出"}');
+    },
+    { timeout: 15_000 },
+  );
+
+  it(
+    'TIME-002: number 生效：空闲超过指定上限 → watchdog 终止请求（不允许「不限制」幻觉）',
     async () => {
       // chunk1 立即到达，此后**挂起**（永不 close）→ idle 从 chunk1 起算；
       // watchdog 1000ms tick：idleMs=1000 >= 150 → timedOut + ctrl.abort()
@@ -110,7 +129,7 @@ describe('TIMEOUT-002 · idleTimeoutMs 语义（流式）', () => {
   );
 
   it(
-    'null = 不限制：超过任何默认上限的长静默后数据到达 → 请求继续并成功完成',
+    'TIME-003: null = 不限制：超过任何默认上限的长静默后数据到达 → 请求继续并成功完成',
     async () => {
       // chunk1 → 1400ms 静默 → chunk2 + close。
       // 若 idle timer 存在（哪怕是默认 300s 之外的任何 number），1400ms 静默期间
@@ -127,7 +146,7 @@ describe('TIMEOUT-002 · idleTimeoutMs 语义（流式）', () => {
   );
 
   it(
-    'null 保留 AbortController：外部中止（用户取消 / 真实断连）仍必须失败',
+    'TIME-004: null 保留 AbortController：外部中止（用户暂停/取消 / 真实断连）仍必须失败',
     async () => {
       // 流永不发数据、永不 close（模拟彻底挂死）；idleTimeoutMs=null（无 idle timer）；
       // 外部 signal 200ms 后 abort → mock 流 error → read() 抛错 → rejects。
@@ -197,7 +216,7 @@ describe('TIMEOUT-003 · AI Test Mode = 不限制（orchestrator 归一）', () 
   });
 
   it(
-    'testMode=true 时显式 idleTimeoutMs 被归一为 null：长静默流仍成功（不依赖 UI 传参）',
+    'TIME-005: testMode=true 时显式 idleTimeoutMs 被归一为 null：长静默流仍成功（不依赖 UI 传参）',
     async () => {
       // 显式传入 120ms —— 若归一失败（照传 number），watchdog 1s tick 即 abort；
       // 归一生效（null）→ 1400ms 静默后 chunk2 到达 → 成功。
@@ -217,7 +236,7 @@ describe('TIMEOUT-003 · AI Test Mode = 不限制（orchestrator 归一）', () 
   );
 
   it(
-    '非 Test Mode 对照：同一显式 idleTimeoutMs=120 正常生效（长静默 → 失败）',
+    'TIME-006: 非 Test Mode 对照：同一显式 idleTimeoutMs=120 正常生效（长静默 → 失败）',
     async () => {
       sseTimedFetch([{ delayMs: 0, payload: oaDelta('{"summary":"') }]);
       const r = await orchestrate({
@@ -232,4 +251,36 @@ describe('TIMEOUT-003 · AI Test Mode = 不限制（orchestrator 归一）', () 
     },
     { timeout: 15_000 },
   );
+});
+
+describe('TIME-007 · 设置层：默认不限制 + unlimited/损坏值 → null', () => {
+  const IDLE_KEY = 'biliscope.ai.idleTimeout.v1';
+
+  beforeEach(async () => {
+    localStorage.clear();
+    await clearAll();
+  });
+
+  it('key 不存在 → null（默认不限制；V3.1.0 的「默认 300s」已废除）', async () => {
+    localStorage.removeItem(IDLE_KEY);
+    await expect(loadIdleTimeoutAsync()).resolves.toBeNull();
+  });
+
+  it("'unlimited' → null；合法数字 → number；损坏/过小值 → null（回落不限制）", async () => {
+    localStorage.setItem(IDLE_KEY, 'unlimited');
+    await expect(loadIdleTimeoutAsync()).resolves.toBeNull();
+    localStorage.setItem(IDLE_KEY, '120000');
+    await expect(loadIdleTimeoutAsync()).resolves.toBe(120_000);
+    localStorage.setItem(IDLE_KEY, 'garbage');
+    await expect(loadIdleTimeoutAsync()).resolves.toBeNull();
+    localStorage.setItem(IDLE_KEY, '500');
+    await expect(loadIdleTimeoutAsync()).resolves.toBeNull();
+  });
+
+  it('saveIdleTimeout 往返：number / null（unlimited）', async () => {
+    await saveIdleTimeout(180_000);
+    await expect(loadIdleTimeoutAsync()).resolves.toBe(180_000);
+    await saveIdleTimeout(null);
+    await expect(loadIdleTimeoutAsync()).resolves.toBeNull();
+  });
 });

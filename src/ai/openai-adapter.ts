@@ -25,8 +25,6 @@
 import { logger } from '@utils/logger';
 import { linkExternalSignal } from './probe';
 import {
-  FALLBACK_TIMEOUT_MS,
-  DEFAULT_IDLE_TIMEOUT_MS,
   STREAM_FIRST_BYTE_TIMEOUT_MS,
   consumeSseStream,
   parseSseDataLines,
@@ -76,13 +74,13 @@ export const DEFAULT_MAX_TOKENS = 2048;
 export const AUTO_FALLBACK_MAX_TOKENS = 8192;
 
 /**
- * V3.0.1 · P0-A：非流式 fallback 的默认超时（120s）。
- * 保留旧导出名 `DEFAULT_TIMEOUT_MS` 以免破坏既有 import
- * （gemini-adapter / orchestrator / 测试都从这里取）。
+ * V3.0.1 · P0-A：请求类异常分类的参考超时值（300s）。
  *
- * 语义变化：它现在**只用于非流式链路**；流式链路用 `STREAM_IDLE_TIMEOUT_MS` 做空闲判定。
+ * V3.1.1 语义收紧：该常量**只**作为 `classifyRequestError` 的参考值与旧 import 兼容，
+ * **不再**作为任何 timer 的隐藏默认 —— 计时完全由 `AnalyzeRequest.idleTimeoutMs` 决定：
+ * `number` = 上限；`null`/`undefined` = 不限制（不创建 timer）。
  */
-export const DEFAULT_TIMEOUT_MS = FALLBACK_TIMEOUT_MS;
+export const DEFAULT_TIMEOUT_MS = 300_000;
 
 export class OpenAICompatibleAdapter implements AIProvider {
   readonly name: ProviderConfig['name'];
@@ -206,11 +204,10 @@ export class OpenAICompatibleAdapter implements AIProvider {
     let receivedChars = 0;
     let timedOut = false;
 
-    // V3.1.0 · P0：空闲上限请求级参数化。
-    //   undefined = 默认 300s；number = 指定毫秒；null = **不限制**（不设空闲 timer）。
-    //   ⚠️ null ≠ 删除中止能力：AbortController 与外部 signal 照常工作，真实断连仍会失败。
-    const idleLimitMs: number | null =
-      req.idleTimeoutMs === null ? null : (req.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS);
+    // V3.1.1 · P0（时长策略）：计时统一规则 —— `number` = 上限；
+    // `null`/`undefined` = **不限制**（不设空闲 timer）。不再有隐藏的 300s 默认。
+    //   ⚠️ 不限制 ≠ 删除中止能力：AbortController 与外部 signal 照常工作，真实断连仍会失败。
+    const idleLimitMs: number | null = typeof req.idleTimeoutMs === 'number' ? req.idleTimeoutMs : null;
 
     // 空闲看门狗：每 1s 检查一次「距上次新数据」。
     // 首字节尚未到达时用 STREAM_FIRST_BYTE_TIMEOUT_MS 判定（同样不立即杀，
@@ -358,22 +355,20 @@ export class OpenAICompatibleAdapter implements AIProvider {
   /**
    * 非流式请求（fallback）。
    *
-   * V3.0.2：`req.noTotalTimeout = true`（probe_guarded healthy / AI Test Mode）时
-   * **不设** BiliScope 人为的总时长 timer —— 请求只由 Provider 完成 / 明确错误 /
-   * 真实断连 / 外部中止来结束。默认策略（single）仍保留总超时兜底。
-   * V3.1.0：`req.idleTimeoutMs === null`（「不限制」）同样不设总时长 timer；
-   * 非流式总超时与流式空闲上限**同选项**（见 analyze）。
+   * V3.1.1：总时长计时统一由 `idleTimeoutMs` 决定 —— `number` = 上限；
+   * `null`（不限制 / Test Mode / 未设置）→ **不设** BiliScope 人为总时长 timer，
+   * 请求只由 Provider 完成 / 明确错误 / 真实断连 / 外部中止（用户取消或暂停）来结束。
+   * 不再读取 `noTotalTimeout`（已废弃）与 `ProviderConfig.timeoutMs`（隐藏 timer 来源）。
    */
   private async sendOnce(
     req: AnalyzeRequest,
     usedMaxTokens: number | undefined,
     rf: Record<string, unknown> | null,
-    timeoutMs: number,
+    totalMs: number | null,
   ): Promise<ChatResp> {
     const ctrl = new AbortController();
     const unlink = linkExternalSignal(req.signal, ctrl);
-    const noTotal = req.noTotalTimeout === true || req.idleTimeoutMs === null;
-    const t = noTotal ? null : setTimeout(() => ctrl.abort(), timeoutMs);
+    const t = totalMs === null ? null : setTimeout(() => ctrl.abort(), totalMs);
     try {
       const res = await fetch(this.endpoint(), {
         method: 'POST',
@@ -398,12 +393,9 @@ export class OpenAICompatibleAdapter implements AIProvider {
     let mode = this.resolveStructuredOutput(req);
     let responseFormat = this.buildResponseFormat(mode, req);
     const useStream = this.resolveStreaming(req);
-    // V3.1.0：非流式总超时与流式空闲上限**同选项**（60/120/180/300s/不限制）。
-    // `idleTimeoutMs === null`（不限制）时该值不会被使用 —— sendOnce 内部短路不建 timer。
-    const fallbackTimeout: number =
-      typeof req.idleTimeoutMs === 'number'
-        ? req.idleTimeoutMs
-        : (this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    // V3.1.1：非流式总时长与流式空闲上限**同选项** —— `number` 生效，否则不限制（null）。
+    // 不再读取 `ProviderConfig.timeoutMs`（隐藏 timer 来源已移除）。
+    const fallbackTimeout: number | null = typeof req.idleTimeoutMs === 'number' ? req.idleTimeoutMs : null;
 
     let data: ChatResp;
     let streamMeta: StreamMeta | undefined;
@@ -532,4 +524,4 @@ interface StreamMeta {
   receivedChars: number;
 }
 
-export { STREAM_FIRST_BYTE_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS };
+export { STREAM_FIRST_BYTE_TIMEOUT_MS };

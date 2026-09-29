@@ -1,22 +1,29 @@
-# BiliScope V3.1.0 — 工程规格（Research Workspace）
+# BiliScope V3.1.1 — 工程规格（Probe 旁路诊断 + AI 暂停恢复）
 
-> 本文件是 V3.1.0 的**有效工程规格**（Single Source of Truth）。
+> 本文件是 V3.1.1 的**有效工程规格**（Single Source of Truth）。
 > V0.1 原始规格已完整归档至文末「附录 A」，仅作历史追溯，**不再约束当前实现**。
 > 规格与实现冲突时，以「已实现且被测试锁定」的事实为准；本文件只做「实现层澄清」。
-> 版本对齐六处：`package.json` / `extension/manifest.json` / `CHANGELOG.md` / `DEPLOYMENT.md` / `docs/development/FINAL_AUDIT.md` / `docs/development/PROGRESS.md`（当前全部 **3.1.0**）；`tests/docs/docs-consistency.test.ts` 是仓库契约，版本号一改测试立即红。
+> 版本对齐六处：`package.json` / `extension/manifest.json` / `CHANGELOG.md` / `DEPLOYMENT.md` / `docs/development/FINAL_AUDIT.md` / `docs/development/PROGRESS.md`（当前全部 **3.1.1**）；`tests/docs/docs-consistency.test.ts` 是仓库契约，版本号一改测试立即红。
 
 ---
 
-## 1. 项目定位（V3.1.0）
+## 1. 项目定位（V3.1.1）
 
 BiliScope = Bilibili 创作者研究 + 评论研究 + 内容生态分析 + AI 辅助研究工作台（Chrome MV3 扩展）。
 
 **本地数据、不读登录态、不存 Cookie。**
 
-V3.1.0 主线：**Research Workspace（研究工作台）** —— 把分散的采集 / 分析 / 灵感 / 实验能力收拢为一个可日常使用的工作台，并完成两项 P0 契约升级：
+V3.1.1 主线：**Probe 旁路诊断 + AI 暂停恢复** —— 把「探针」从 Main 的看门人降级为纯诊断通道，把「中断」升级为可恢复的暂停：
+
+1. **Probe 旁路诊断**：探针不改 Main 请求、不决定 Main 成败、不主动 Abort Main；`探针失败 + 主分析成功 = 分析成功（探针存在警告）`。
+2. **暂停 / 继续分析**：暂停保留输入快照，继续复用**完全相同**的快照重发请求。
+3. **Main 请求指纹冻结**：请求构造后不可 mutate（SHA-256 指纹 before === after 由测试证明）。
+4. **时长策略 8 档，默认不限制**：`null/undefined` = 不建任何人为 timer；**绝不删除 `AbortController`**。
+
+V3.1.0 主线（继续有效）：**Research Workspace（研究工作台）** —— 把分散的采集 / 分析 / 灵感 / 实验能力收拢为一个可日常使用的工作台，并完成两项 P0 契约升级：
 
 1. **AI 评论数据隐私化**：AI 只见匿名引用（`C001…`），真实 ID 留本地。
-2. **AI 时长策略放宽**：默认 300s 空闲监控，可选不限制；**绝不删除 `AbortController`**。
+2. **AI 时长策略放宽**：空闲监控取代总时长硬杀；**绝不删除 `AbortController`**。
 
 不做（沿袭 V0.1）：自动剪辑、自动发布、爆款概率百分比预测、付费系统、跨平台、用户系统、云数据库、登录态采集。
 
@@ -92,7 +99,7 @@ BiliScope/
 
 ---
 
-## 6. AI 层规格（V3.1.0 核心）
+## 6. AI 层规格（V3.1.1 核心）
 
 ### 6.1 统一 orchestrator
 
@@ -113,34 +120,53 @@ BiliScope/
 - AI 结论回填 `citationMap` 后，`support / opposition` 每条论断仍可点击定位真实评论；无引用的论断显式标注。
 - 审计记录保留原始请求与响应（本地），产品结果不回显身份信息。
 
-### 6.4 AI 时长策略（V3.1.0 P0）
+### 6.4 AI 时长策略（V3.1.1 P0）
 
-- `AnalyzeRequest.idleTimeoutMs` 三态语义：`undefined` = 默认 300s；`number` = UI 指定（60/120/180/300）；`null` = 不限制（不建 idle timer）。
-- **`null` ≠ 不可取消**：`AbortController` 与外部 signal 始终保留——真实断连、用户取消仍必须失败。
-- **Test Mode 硬归一**：orchestrator 内 `const idleTimeoutMs = openTestMode ? null : opts.idleTimeoutMs`，不依赖 UI 传参，与 `noTotalTimeout` 同层级。
+- `AnalyzeRequest.idleTimeoutMs` 二态语义：`number` = 空闲上限；**`null / undefined` = 不限制（不建任何 idle timer）**。
+- 设置页 8 档：`不限制（默认）/ 60 / 120 / 180 / 300 / 600 / 900 / 1800 秒`；设置存储 `IdleTimeoutPref = number | null`，空 / 损坏值一律归一为 `null`。
+- **`null` ≠ 不可取消**：`AbortController` 与外部 signal 始终保留——真实断连、用户暂停 / 取消仍必须失败。
+- **Test Mode 硬归一**：orchestrator 内 Test Mode 下 `idleTimeoutMs` 归一为 `null`，不依赖 UI 传参。
+- **`noTotalTimeout` 字段废弃**：不再读写；`ProviderConfig.timeoutMs` 退出计时决策；`DEFAULT_TIMEOUT_MS = 300_000` 仅作为 `classifyRequestError` 的参考值。任何请求路径不得再出现隐藏的 30/60/120/300 秒强杀 timer（`TIMEOUT-002` 红线测试锁定）。
 - 优先级：`request.maxTokens → provider.maxTokens → (requiresMaxTokens ? fallbackMaxTokens ?? 8192 : 省略)`；默认（Auto）请求体**省略** `max_tokens`，禁止任务级硬编码复活。
 - 样本 select `[60, 80, 120, 160, 200]`；`OUTPUT_LIMIT_PROVIDER`（输出超限）优先于 context-too-large；Auto 下 `OUTPUT_TRUNCATED` 文案不得提示 BiliScope 超时。
 
-### 6.5 probe_guarded（评论分析默认）
+### 6.5 Probe 旁路诊断（V3.1.1 P0，替代 probe_guarded 看门语义）
 
-- Probe（`max_tokens=32` / 非流式 / 非 JSON / 无评论数据）与 Main **并行**；看门 30s → 双杀 → `REQUEST_PROBE_TIMEOUT`；healthy → 取消一切人为总时长限制，Main 只由 Provider 完成 / MAX_TOKENS / 断连 / 用户取消结束。
-- Main 先完成 → `probeAbort.abort('main-completed')` 是正确资源回收。
-- 探针 token 不计入分析成本；探针失败留独立审计行；Main 成功回写 `meta.probe` 按主键 `get` + `put`。
+- Probe（`max_tokens=32` / 非流式 / 非 JSON / 无评论数据）与 Main **并行**，但 Probe **只做旁路诊断**：**不改 Main 请求、不决定 Main 成败、不主动 Abort Main**（V3.1.0 及之前的「看门 30s → 双杀」与「Probe !ok → abort Main」路径已删除）。
+- **30 秒只是 Probe 自己的观察窗**：超时 → Probe 以 `probe_timeout` 结束并留独立审计行，Main 原样继续。
+- **HTTP 2xx 即 `transportConnected=true`（含空响应体）**；探针空响应归纳为 `warning` 而非失败；**真正 `OUTPUT_EMPTY` 只允许 Main 判定**。
+- `ProbeResult.status ∈ pending | healthy | warning | timeout | failed | skipped`；`summarizeProbeResult()` 优先级：timedOut → timeout；errorMessage → failed；2xx → healthy | warning。
+- **`探针失败 + Main 成功 = AI 分析成功（探针存在警告）`**；探针审计回写 `meta.probe` 携带 `status / transportConnected / modelResponded` 三态（替代旧 success 布尔）。
+- 探针 token 不计入分析成本；探针主动结束（Main 先完成 / 用户暂停或取消）→ `skipped` **不留审计行**；仅真实失败 / 超时留独立行。
+- **`REQUEST_PROBE_TIMEOUT` 废弃**：保留枚举兼容旧审计数据，**不再产生**。
+- Main 先完成 → `probeAbort.abort('main-completed')` 是正确资源回收（对应 skipped）。
 
-### 6.6 流式与空闲超时
+### 6.6 暂停与继续（V3.1.1 P0）
 
-- 流式默认；首字节 30s 仅提示；**连续空闲达到时长策略设定值（默认 300s）无新 chunk 才 abort**；非流式 fallback 同策略。
+- **暂停分析**：UI abort reason=`'pause'` → Main 与探针同时终止 → 失败码 `REQUEST_PAUSED`（`retryable=false`）；保留输入快照、**不写 `CommentAnalysis`**、不留半截审计行（中止的请求本来就不落审计）。
+- **继续分析**：复用**完全相同**的 input snapshot 重发 Main——不重新采集、不重排 sample、不偷改参数；两次请求指纹必须一致。
+- **暂停 ≠ 取消**：无 reason 的中止仍是取消（`REQUEST_FAILED` / user-cancelled）；`linkExternalSignal` 透传 `external.reason` 保证语义穿透到 orchestrator。
+
+### 6.7 Main 请求冻结（requestFingerprint，V3.1.1 P0）
+
+- baseRequest 构造后即生成不可变快照与 SHA-256 `requestFingerprint`（序列化含 systemPrompt / userPrompt / temperature / maxTokens / structuredOutput / jsonSchemaName / stream / idleTimeoutMs / provider / model，`\u0000` 分隔）。
+- Main 落定（成功或失败）后再次计算：**`fingerprintBefore === fingerprintAfter` 必须被测试证明**（MAIN-001..003）；自动修复请求同样不得 mutate。
+- 指纹随审计落库（`requestFingerprintBefore / After`），可离线复核。
+
+### 6.8 流式与空闲超时
+
+- 流式默认；首字节 30s 仅提示；**连续空闲达到时长策略设定值（默认不限制）无新 chunk 才 abort**；非流式 fallback 同策略。
 - 优先级 `request.stream → provider.supportsStreaming → fallback`；修复请求也必须透传 `stream / onProgress / idleTimeoutMs`。
 - 仅真实 `finishReason = length / MAX_TOKENS` 才 `OUTPUT_TRUNCATED`。
 - **AI 失败不清空上次成功**：不 `setReport(null)`、不删库。
 
-### 6.7 失败分层
+### 6.9 失败分层
 
-- `failures.ts` 15 码；`classifyRequestError(e, timeoutMs?)` 是请求类异常唯一分类入口；`describeFailure()` 禁止「技术细节：空」。
+- `failures.ts` **16 码**（V3.1.1 新增 `REQUEST_PAUSED`；`REQUEST_PROBE_TIMEOUT` 保留但废弃不再产生）；`classifyRequestError(e, timeoutMs?)` 是请求类异常唯一分类入口；`describeFailure()` 禁止「技术细节：空」。
 
 ---
 
-## 7. UI 规格（V3.1.0）
+## 7. UI 规格（V3.1.1）
 
 ### 7.1 设计原则
 
@@ -148,17 +174,17 @@ BiliScope/
 - **零 inline style**（新 UI 一律走类名）；旧 UI 允许存量。
 - `unknown` 一律显示 `–`。
 
-### 7.2 页面清单（V3.1.0）
+### 7.2 页面清单（V3.1.1）
 
 | 入口 | 职责 |
 |---|---|
 | `popup` | 上下文识别（当前视频 / 搜索页）+ 7 个快速操作入口 + 最近任务（`__APP_VERSION__` 版本 tag） |
 | `dashboard`（研究台） | 全库 KPI（视频 / 评论 / 创作者 / AI 分析=total−probe / 快照 / 评论研究 / 近 7 日任务）+ 最近 AI 分析表 + 最近评论研究表；**只读 Dexie、禁联网**；Nav 首位 |
 | `video-research`（视频库） | 最近 300 条视频、keyword 过滤（title / bvid / authorName）、4 排序（pubTime / views / likes / comments 按最新快照）、直达评论研究 |
-| `comment` | 评论研究与 AI 分析主战场 |
+| `comment` | 评论研究与 AI 分析主战场（V3.1.1：暂停 / 继续按钮、Probe 与 Main 独立状态行、真实 elapsed / 样本数 / 输出上限 / 时长模式展示） |
 | `idea` | 选题库（TopicPanel：竞争度四档 / upsertByName / 删除）+ 灵感 + ExperimentPanel（状态机 + Idea→实验三步） |
 | `my` | 自有账号 + DataPortPanel（导出 JSON / 导入 merge / replace 二次确认） |
-| `options` | Provider / 输出上限 Auto / **AI 时长策略（60/120/180/300/不限制，即时保存）** / Test Mode / 关于（版本来自 `__APP_VERSION__`） |
+| `options` | Provider / 输出上限 Auto / **AI 时长策略（V3.1.1 八档：不限制（默认）/60/120/180/300/600/900/1800 秒，即时保存）** / Test Mode / 关于（版本来自 `__APP_VERSION__`） |
 
 ### 7.3 组件契约
 
@@ -225,10 +251,11 @@ typecheck → test → lint → build → test:dist → scan-secrets → verify-
 
 ---
 
-## 13. 验收标准（V3.1.0）
+## 13. 验收标准（V3.1.1）
 
-- FEATURE-001..010 全过（Popup / Dashboard / 视频库 / 选题库 / Idea→实验 / 导入导出 / 匿名引用 / 时长策略 / 版本注入 / Nav）。
-- 门禁链全绿 + `docs-consistency` 契约全绿（README / CHANGELOG / 版本三处对齐 3.1.0）。
+- V3.1.0 FEATURE-001..010 继续全过（Popup / Dashboard / 视频库 / 选题库 / Idea→实验 / 导入导出 / 匿名引用 / 时长策略 / 版本注入 / Nav）。
+- V3.1.1 测试矩阵全过：**PROBE-001..008 / MAIN-001..003 / PAUSE-001..005 / TIME-001..007 / PRIVACY-001..004**。
+- 门禁链全绿 + `docs-consistency` 契约全绿（README / CHANGELOG / 版本三处对齐 3.1.1）。
 - 结果如实写进 `docs/development/FINAL_AUDIT.md` 与 `docs/development/PROGRESS.md`。
 
 ---
