@@ -1,5 +1,5 @@
 /**
- * V3.1.1 · 第九 / 十节：GitHub 文档一致性测试。
+ * V3.2.0 · 第九 / 十节：GitHub 文档一致性测试。
  *
  * 目标：README 与「活动源码 / 实际仓库结构」始终一致，且本地链接永不 404。
  * 这些断言直接读取磁盘文件，属于「仓库契约测试」。
@@ -25,14 +25,14 @@ function localLinks(md: string): string[] {
   return [...new Set(out)];
 }
 
-describe('DOC · README 与版本一致性（V3.1.1 · 第八节）', () => {
-  it('DOC-001: README no longer presents V0.1/V0.2/V0.3/V3.0.x/V3.1.0 as the current version', () => {
+describe('DOC · README 与版本一致性（V3.2.0 · 第八节）', () => {
+  it('DOC-001: README no longer presents V0.1/V0.2/V0.3/V3.0.x/V3.1.x as the current version', () => {
     const readme = read('README.md');
 
-    // 当前版本必须显式声明为 v3.1.1
-    expect(readme).toMatch(/v3\.1\.1/);
+    // 当前版本必须显式声明为 v3.2.0
+    expect(readme).toMatch(/v3\.2\.0/);
     expect(readme).toMatch(/## 当前版本/);
-    expect(readme).toMatch(/V3\.1\.1 = Probe 旁路诊断 \+ AI 暂停恢复/);
+    expect(readme).toMatch(/V3\.2\.0 = Comment Research Analyst（评论研究分析师）/);
 
     // 「V0.1 = ...」这种把旧版本当作当前定位的写法必须消失
     expect(readme).not.toMatch(/^V0\.1\s*=/m);
@@ -54,14 +54,23 @@ describe('DOC · README 与版本一致性（V3.1.1 · 第八节）', () => {
       '## AI 配置',
       '## 数据与隐私',
       '## 已知限制',
-      '## V3.0 → V3.1.1',
+      '## V3.0 → V3.2.0',
       '## Project Structure',
       '## License',
     ]) {
       expect(readme).toContain(heading);
     }
 
-    // V3.1.1 Probe 旁路诊断 + AI 暂停恢复核心能力必须在 README 有真实叙述
+    // V3.2.0 Comment Research Analyst 核心能力必须在 README 有真实叙述
+    expect(readme).toMatch(/重建评论区的观点结构/);
+    expect(readme).toMatch(/主叙事/);
+    expect(readme).toMatch(/反叙事/);
+    expect(readme).toMatch(/信号\/噪声/);
+    expect(readme).toMatch(/可验证假设/);
+    expect(readme).toMatch(/高级复述/);
+    expect(readme).toMatch(/relevantFacts/);
+    expect(readme).toMatch(/auditId/);
+    // V3.1.1 Probe 旁路诊断 + AI 暂停恢复叙述继续保留
     expect(readme).toMatch(/旁路诊断/);
     expect(readme).toMatch(/暂停.*继续分析|继续分析.*暂停/s);
     expect(readme).toMatch(/requestFingerprint|指纹冻结/);
@@ -150,18 +159,27 @@ describe('DOC · 仓库文档结构（V3.0.1 · 第十节）', () => {
   });
 });
 
-describe('DOC · CHANGELOG 与版本号一致（V3.1.1 · 第十二节）', () => {
-  it('CHANGELOG 含 [V3.1.1] - 2026-09-29 段落及其 Fixed / Improved 明细（V3.1.0 / V3.0.2 / V3.0.1 历史段落保留）', () => {
+describe('DOC · CHANGELOG 与版本号一致（V3.2.0 · 第十二节）', () => {
+  it('CHANGELOG 含 [V3.2.0] - 2026-09-29 段落及其 Changed / Fixed 明细（V3.1.1 / V3.1.0 / V3.0.2 / V3.0.1 历史段落保留）', () => {
     const changelog = read('CHANGELOG.md');
+    expect(changelog).toMatch(/\[V3\.2\.0\] - 2026-09-29/);
+    // V3.2.0 条目必须覆盖本轮真实变更
+    expect(changelog).toMatch(/Comment Research Analyst|评论研究分析师/);
+    expect(changelog).toMatch(/narratives/);
+    expect(changelog).toMatch(/hypothesesToTest/);
+    expect(changelog).toMatch(/relevantFacts/);
+    expect(changelog).toMatch(/高级复述/);
+    expect(changelog).toMatch(/auditId/);
+    expect(changelog).toMatch(/AI-RESEARCH-001|AI-META-001/);
+    // V3.1.1 历史段落不得删除
     expect(changelog).toMatch(/\[V3\.1\.1\] - 2026-09-29/);
-    // V3.1.1 条目必须覆盖本轮真实变更
     expect(changelog).toMatch(/旁路诊断/);
     expect(changelog).toMatch(/REQUEST_PAUSED/);
     expect(changelog).toMatch(/requestFingerprint|指纹冻结/);
     expect(changelog).toMatch(/探针存在警告|Probe FAIL \+ Main SUCCESS/);
     expect(changelog).toMatch(/不限制/);
     expect(changelog).toMatch(/PROBE-001|PAUSE-001|TIME-001|PRIVACY-001/);
-    // 历史段落不得删除
+    // V3.1.0 及更早历史段落不得删除
     expect(changelog).toMatch(/\[V3\.1\.0\] - 2026-09-29/);
     expect(changelog).toMatch(/匿名引用|citationMap/);
     expect(changelog).toMatch(/idleTimeoutMs|AI 时长策略/);
@@ -175,12 +193,12 @@ describe('DOC · CHANGELOG 与版本号一致（V3.1.1 · 第十二节）', () =
     expect(changelog).toMatch(/CommentAnalysis/);
   });
 
-  it('版本号四处对齐为 3.1.1（package.json / manifest.json / DEPLOYMENT / CHANGELOG 最新段）', () => {
+  it('版本号四处对齐为 3.2.0（package.json / manifest.json / DEPLOYMENT / CHANGELOG 最新段）', () => {
     const pkg = JSON.parse(read('package.json')) as { version: string };
     const manifest = JSON.parse(read('extension/manifest.json')) as { version: string };
-    expect(pkg.version).toBe('3.1.1');
-    expect(manifest.version).toBe('3.1.1');
-    expect(read('DEPLOYMENT.md')).toMatch(/当前：\*\*v3\.1\.1\*\*/);
-    expect(read('CHANGELOG.md')).toMatch(/## \[V3\.1\.1\] - 2026-09-29/);
+    expect(pkg.version).toBe('3.2.0');
+    expect(manifest.version).toBe('3.2.0');
+    expect(read('DEPLOYMENT.md')).toMatch(/当前：\*\*v3\.2\.0\*\*/);
+    expect(read('CHANGELOG.md')).toMatch(/## \[V3\.2\.0\] - 2026-09-29/);
   });
 });

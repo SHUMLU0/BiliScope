@@ -1,9 +1,16 @@
 # BiliScope V3.1.1 — 工程规格（Probe 旁路诊断 + AI 暂停恢复）
 
+> **V3.2.0 增量注记（2026-09-29）**：当前产品版本已升级为 **V3.2.0 Comment Research Analyst**。
+> 本文件第 1–13 章的 V3.1.1 语义（旁路诊断 / 暂停恢复 / 指纹冻结 / 时长策略 / 隐私边界）**全部继续有效**；
+> V3.2.0 的变更仅覆盖评论 AI 契约层：`src/ai/schemas.ts` 研究契约（narratives / audienceSegments /
+> tensions / mechanisms / signalVsNoise / contentImplications / claims / hypothesesToTest /
+> relevantFacts）、prompt 第一原则与因果纪律、`CommentAIReport` 研究报告 UI、`CommentAnalysis.auditId`
+> 元数据恢复。详见 `docs/development/FINAL_AUDIT.md` § V3.2.0 与 `CHANGELOG.md` [V3.2.0]。
+
 > 本文件是 V3.1.1 的**有效工程规格**（Single Source of Truth）。
 > V0.1 原始规格已完整归档至文末「附录 A」，仅作历史追溯，**不再约束当前实现**。
 > 规格与实现冲突时，以「已实现且被测试锁定」的事实为准；本文件只做「实现层澄清」。
-> 版本对齐六处：`package.json` / `extension/manifest.json` / `CHANGELOG.md` / `DEPLOYMENT.md` / `docs/development/FINAL_AUDIT.md` / `docs/development/PROGRESS.md`（当前全部 **3.1.1**）；`tests/docs/docs-consistency.test.ts` 是仓库契约，版本号一改测试立即红。
+> 版本对齐六处：`package.json` / `extension/manifest.json` / `CHANGELOG.md` / `DEPLOYMENT.md` / `docs/development/FINAL_AUDIT.md` / `docs/development/PROGRESS.md`（当前全部 **3.2.0**）；`tests/docs/docs-consistency.test.ts` 是仓库契约，版本号一改测试立即红。
 
 ---
 

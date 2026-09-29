@@ -43,11 +43,13 @@ import { buildAdapter } from './service';
 import { buildRepairPrompt } from './prompts';
 import {
   DOMAIN_SCHEMAS,
+  forEachResultRefs,
   unwrapAIResult,
   validateAIResult,
   type AIDomain,
   type CommentAIResult,
   type GeneralAIResult,
+  type NarrativeRole,
 } from './schemas';
 import { zodToStrictJsonSchema } from './json-schema';
 import {
@@ -221,8 +223,12 @@ export type OrchestrateResult = OrchestrateSuccess | OrchestrateFailure;
 // ─────────────────────────────────────────────────────────── 引用校验
 
 /**
- * 校验 support/opposition/themes/findings 的匿名引用（refs/evidenceRefs）是否真实存在于样本中。
- * 这是「可验证」的核心：模型说「很多用户支持 X」，必须能指回样本内的真实评论（经 citationMap 回溯）。
+ * 校验所有研究判断字段的匿名引用（refs / evidenceRefs / basisRefs / evidenceForRefs /
+ * evidenceAgainstRefs）是否真实存在于样本中。
+ * 这是「可验证」的核心：模型说「主叙事是 X」，必须能指回样本内的真实评论（经 citationMap 回溯）。
+ *
+ * V3.2.0：扫描范围扩展到全部研究字段（forEachResultRefs 统一口径）；
+ * claimsWithoutCitation = 关键判断 / 机制 / 内容含义中「没有任何引用」的条数。
  *
  * V3.1.0 · P0-AI 隐私化：模型只见过 C001 类匿名 ref，因此白名单也必须是 ref（knownRefs）。
  */
@@ -238,12 +244,13 @@ export function auditCitations(data: CommentAIResult, knownRefs: string[] | unde
     }
   };
 
-  for (const c of data.support) scan(c.refs);
-  for (const c of data.opposition) scan(c.refs);
-  for (const t of data.themes) scan(t.refs);
-  for (const f of data.findings) scan(f.evidenceRefs);
+  forEachResultRefs(data, scan);
 
-  const claimsWithoutCitation = [...data.support, ...data.opposition].filter((c) => c.refs.length === 0).length;
+  const claimsWithoutCitation = [
+    ...data.claims.map((c) => c.refs),
+    ...data.mechanisms.map((m) => m.evidenceRefs),
+    ...data.contentImplications.map((c) => c.basisRefs),
+  ].filter((refs) => refs.length === 0).length;
 
   return { unknownRefs: [...unknown], claimsWithoutCitation, totalCitations: total };
 }
@@ -271,34 +278,49 @@ export function auditCitations(data: CommentAIResult, knownRefs: string[] | unde
  */
 export function mapToCommentAnalysis(
   result: CommentAIResult,
-  meta: { videoId: string; model: string; raw?: unknown; citationMap?: Record<string, string> },
+  meta: {
+    videoId: string;
+    model: string;
+    raw?: unknown;
+    citationMap?: Record<string, string>;
+    /** V3.2.0 · AI-META：本次 Main 审计行 id —— refresh 后 UI 经此恢复真实耗时/请求元数据 */
+    auditId?: string;
+  },
 ): CommentAnalysis {
   // 情绪分布：模型没给结构化情绪计数，就不编造 —— 统一 0 并在 uncertainty 里说明。
   // （V3.0 禁止 unknown → 0 伪装；这里 0 的含义是「未提供结构化情绪计数」，已写入 uncertainty。）
   const sentiment = { positive: 0, neutral: 0, negative: 0 };
 
-  const themeResult = result.themes.map((t) => {
-    const cite = t.refs.length ? `（引用 ${t.refs.length} 条评论）` : '';
-    return `${t.name}${cite}`;
+  // V3.2.0：叙事结构投影到 themeResult（role 用中文标签，保留可读性）
+  const ROLE_LABEL: Record<NarrativeRole, string> = {
+    primary: '主叙事',
+    secondary: '次叙事',
+    counter: '反叙事',
+  };
+  const themeResult = result.narratives.map((n) => {
+    const cite = n.refs.length ? `（引用 ${n.refs.length} 条评论）` : '';
+    return `[${ROLE_LABEL[n.role]}] ${n.name}${cite}`;
   });
 
-  // 支持/反对：把 CitedClaim 渲染为「观点 + 引用」，同时把 ref 回溯为真实 rpid 汇总
-  const cited = new Set<string>();
-  const renderClaims = (claims: typeof result.support): string[] =>
-    claims.map((c) => {
-      for (const ref of c.refs) {
-        const real = meta.citationMap?.[ref];
-        if (real) cited.add(real);
-      }
-      const shown = c.refs.map((ref) => meta.citationMap?.[ref] ?? ref);
-      return c.refs.length ? `${c.statement} [引用 ${shown.join(', ')}]` : `${c.statement} [无引用]`;
+  // V3.2.0：核心矛盾投影（supportResult/oppositionResult 为旧字段，tensions 承担其语义后留空）
+  const renderTensions = (): string[] =>
+    result.tensions.map((t) => {
+      const shown = t.refs.map((ref) => meta.citationMap?.[ref] ?? ref);
+      const cite = t.refs.length ? ` [引用 ${shown.join(', ')}]` : ' [无引用]';
+      return `${t.statement} ｜ A 方：${t.sideA} ｜ B 方：${t.sideB}${cite}`;
     });
 
-  const supportResult = renderClaims(result.support);
-  const oppositionResult = renderClaims(result.opposition);
+  // 引用回溯：全字段收集匿名 ref → 真实 rpid（本地口径）
+  const cited = new Set<string>();
+  forEachResultRefs(result, (refs) => {
+    for (const ref of refs) {
+      const real = meta.citationMap?.[ref];
+      if (real) cited.add(real);
+    }
+  });
 
   const uncertaintyNote = [
-    result.summary ? `核心结论：${result.summary}` : '',
+    result.summary ? `核心判断：${result.summary}` : '',
     ...result.uncertainty,
     '情绪分布未由结构化输出提供，故 positive/neutral/negative 记为 0（表示"未提供"，非"无情绪"）。',
   ]
@@ -310,13 +332,16 @@ export function mapToCommentAnalysis(
     videoId: meta.videoId,
     createdAt: nowIso(),
     model: meta.model,
-    factSummary: result.facts.join('\n'),
+    // V3.2.0 · AI-META：关联审计行（refresh 后恢复真实 durationMs / requestCount 等）
+    auditId: meta.auditId,
+    factSummary: result.relevantFacts.join('\n'),
     themeResult,
     sentimentResult: sentiment,
     userNeedResult: result.needs,
     questionResult: result.questions,
-    supportResult,
-    oppositionResult,
+    // V3.2.0：supportResult/oppositionResult 由 tensions 投影（旧 UI 字段保留兼容）
+    supportResult: renderTensions(),
+    oppositionResult: [],
     citedCommentRpids: [...cited],
     uncertaintyNote: uncertaintyNote.slice(0, 5000),
     // ── V3.0.1 · P0-2：两个字段语义分离 ──
@@ -826,6 +851,8 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       model: preCfg.model,
       raw: usedResponse.raw,
       citationMap: opts.citationMap,
+      // V3.2.0 · AI-META：产品结果关联 Main 审计行（refresh 后恢复真实元数据，不再硬编码 0）
+      auditId: first.audit.id,
     });
     await commentAnalysisRepo.add(domainRecord);
     domainRecordId = domainRecord.id;
@@ -851,6 +878,9 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
             incomplete: false,
             repaired,
             requestCount,
+            // V3.2.0 · AI-META：整次分析真实耗时（含校验/修复/落库）——
+            // UI refresh 后经 auditId 恢复，杜绝「180000ms → 0ms」
+            totalDurationMs: durationMs,
             citations: citations as unknown as Record<string, unknown>,
             domainRecordId,
             // V3.1.1：Main 请求指纹（before/after 必须相等 —— 请求从未被 mutate）

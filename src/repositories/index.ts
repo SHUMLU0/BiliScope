@@ -399,6 +399,10 @@ export const aiAnalysisRepo = {
     await db.aiAnalyses.add(analysis);
     return analysis.id;
   },
+  /** V3.2.0 · AI-META：按 id 精确读取审计行（产品结果经 auditId 关联恢复真实元数据） */
+  async get(id: string): Promise<AIAnalysis | undefined> {
+    return db.aiAnalyses.get(id);
+  },
   async listByTarget(targetId: string, type: AIAnalysis['type']): Promise<AIAnalysis[]> {
     return db.aiAnalyses.where('targetId').equals(targetId).toArray().then((arr) => arr.filter((a) => a.type === type));
   },

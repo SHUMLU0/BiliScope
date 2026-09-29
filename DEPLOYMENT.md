@@ -156,22 +156,24 @@ AI 分析走统一编排：**Provider → 请求 → 结构化输出 → Zod 校
 - 详见 `ai-history.html`（「AI 历史」）——可按类型筛选、展开查看每次请求的原始 prompt 与响应。
 
 ## 十一、版本
-当前：**v3.1.1**（**V3.1.1 —— Probe 旁路诊断 + AI 暂停恢复**。核心：
-① **Probe 拆除看门人**——探针只做旁路诊断：不改 Main 请求、不决定 Main 成败、不主动 Abort Main；
-30s 只是 Probe 自己的观察窗（超时 → Probe 结束，Main 继续）；HTTP 2xx 即 `transportConnected=true`
-（含空响应）；空响应 = warning；真正 `OUTPUT_EMPTY` 只允许 Main 判定；
-**`Probe FAIL + Main SUCCESS = 分析成功（探针存在警告）`**；`REQUEST_PROBE_TIMEOUT` 废弃不再产生；
-② **暂停 / 继续分析**——暂停（Abort Main+Probe → `REQUEST_PAUSED`、保留输入快照、不写产品结果、
-不留半截审计行）→ 继续复用**完全相同**的 input snapshot 重发 Main（不重新采集 / 不重排 sample）；
-③ **Main 请求指纹冻结**——不可变快照 + SHA-256 `requestFingerprint`，
-`fingerprintBefore === fingerprintAfter` 由测试证明请求全程未被 mutate，指纹随审计落库；
-④ **时长策略 8 档**——`不限制（默认）/ 60/120/180/300/600/900/1800 秒`；
-`idleTimeoutMs = null/undefined` = 不建任何人为 timer；`noTotalTimeout` 废弃，
-任何路径不得再有隐藏 30/60/120/300s 强杀；**不限制 ≠ 删除中止能力**；
-⑤ 失败分层 16 码（新增 `REQUEST_PAUSED`）。
-承接 V3.1.0 Research Workspace（AI 隐私化 + 工作台 UI）→ V3.0.2 AI 开放测试模式 →
-V3.0.1 稳定性/性能/UI/文档维护版 → V3.0.0 可验证 AI 分析系统 → V0.2.2 裸 BV 评论采集依赖闭环修复 →
-V0.2.1 评论采集真实性修复（`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 →
-V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
+当前：**v3.2.0**（**V3.2.0 —— Comment Research Analyst 评论研究分析师**。核心：
+① **研究契约重写**——评论 schema 从「分类整理」升级为「研究判断」：narratives（主/次/反叙事 ≤6）、
+audienceSegments（用户分群 ≤5）、tensions（核心矛盾+双方立场 ≤5）、mechanisms（可能机制+confidence ≤5）、
+signalVsNoise（信号/噪声+reason 必填 ≤8）、contentImplications（内容研究含义 ≤5）、
+claims（可核查论断+confidence ≤8）、hypothesesToTest（假设→支持→反证→缺失证据→验证方法 ≤5）；
+`relevantFacts` ≤5 且禁止复述 UI 统计块；
+② **Prompt 第一原则**——任务是重建评论区观点结构，不是分类评论；「高级复述」禁令、
+因果措辞纪律（可能机制 / 相关≠因果）、证据不足留空合法、输出预算 1500–3000（复杂 3000–5000）tokens；
+③ **UI 重构为研究报告**——核心判断 → 评论区结构 → 核心矛盾 → 用户群体 → 成因机制 →
+信号/噪声 → 内容研究含义 → 可验证假设 → 不确定性 → 原始分析（旧分类段保留可折叠，旧记录继续可读）；
+④ **AI-META 修复**——`CommentAnalysis.auditId` 关联审计行，刷新后恢复真实
+model / durationMs / requestCount / repaired / 引用审计（旧记录如实显示占位值，绝不编造）；
+⑤ **防幽灵成功升级**——七个研究判断字段至少一个非空，纯事实复述被 Zod 拒绝；
+⑥ 新增测试 AI-RESEARCH-001..009 + AI-META-001..003。
+承接 V3.1.1 Probe 旁路诊断 + AI 暂停恢复 → V3.1.0 Research Workspace（AI 隐私化 + 工作台 UI）→
+V3.0.2 AI 开放测试模式 → V3.0.1 稳定性/性能/UI/文档维护版 → V3.0.0 可验证 AI 分析系统 →
+V0.2.2 裸 BV 评论采集依赖闭环修复 → V0.2.1 评论采集真实性修复（`REAL_API_PASS`） →
+V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 →
+V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
 
-历史版本：v3.1.0 / v3.0.2 / v3.0.1 / v3.0.0 / v0.2.2 / v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。
+历史版本：v3.1.1 / v3.1.0 / v3.0.2 / v3.0.1 / v3.0.0 / v0.2.2 / v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。

@@ -1,8 +1,55 @@
-# FINAL_AUDIT.md — BiliScope V3.1.1 最终审计
+# FINAL_AUDIT.md — BiliScope V3.2.0 最终审计
 
-> 生成于 2026-09-29 · 当前版本 **V3.1.1**（Probe 旁路诊断 + AI 暂停恢复）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-29 · 当前版本 **V3.2.0**（Comment Research Analyst 评论研究分析师）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
 >
-> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → V3.0.1 稳定性 / 性能 / UI / 文档维护版 → V3.0.2 AI 开放测试模式 → V3.1.0 Research Workspace → **V3.1.1 Probe 旁路诊断 + AI 暂停恢复**
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → V3.0.1 稳定性 / 性能 / UI / 文档维护版 → V3.0.2 AI 开放测试模式 → V3.1.0 Research Workspace → V3.1.1 Probe 旁路诊断 + AI 暂停恢复 → **V3.2.0 Comment Research Analyst**
+
+---
+
+## 0x-1. V3.2.0 Comment Research Analyst（评论研究分析师）
+
+> 定位：**评论 AI 从「评论整理器」升级为「研究分析师」**——不再只分类与复述评论，
+> 而是重建评论区的观点结构，解释讨论为何形成、如何冲突、对内容研究意味着什么。
+> **不改**：采集层 / CommentCollector / WBI / Dexie 数据层 / 统计与抽样分区 / 探针语义 / 暂停语义 / 指纹冻结；
+> **不删**历史数据与历史审计；旧记录（V3.1.x 及更早）继续可读。
+
+### 交付项
+
+| # | 交付 | 实现 | 测试 |
+|---|---|---|---|
+| 1 | 研究契约重写（`src/ai/schemas.ts`） | 新增 `narratives`（主/次/反 ≤6）/ `audienceSegments`（≤5）/ `tensions`（statement+sideA+sideB ≤5）/ `mechanisms`（hypothesis+explanation+evidenceRefs+confidence ≤5）/ `signalVsNoise`（type+statement+reason 必填 ≤8）/ `contentImplications`（insight+basisRefs+implication ≤5）/ `claims`（statement+refs+confidence ≤8）/ `hypothesesToTest`（hypothesis+evidenceForRefs+evidenceAgainstRefs+missingEvidence+testMethod ≤5）；`facts` → `relevantFacts`（≤5，禁复述 UI 统计块）；`forEachResultRefs` 统一遍历 8 类 ref 数组 | `AI-RESEARCH-003..009` |
+| 2 | 防「幽灵成功」升级 | schema 层 `superRefine` 硬约束：七个研究判断字段（narratives/tensions/mechanisms/signalVsNoise/contentImplications/claims/hypothesesToTest）至少一个非空——纯事实复述输出直接被 Zod 拒绝 | `AI-RESEARCH-001/002` |
+| 3 | Prompt 第一原则（`src/ai/prompts.ts`） | 「重建观点结构，不是分类评论」+ 12 问研究框架；「高级复述」禁令；因果措辞纪律（可能机制 / 相关≠因果 / 禁无证据全称判断）；证据不足留空数组合法；输出预算核心报告 1500–3000 tokens、复杂 200 条样本 3000–5000 tokens；`COMMENT_SCHEMA_TEXT` 与 Zod 逐字对应 | `AI-RESEARCH-006/009` + prompts 契约测试 |
+| 4 | UI 重构为研究报告（`CommentAIReport.tsx`） | 段落顺序：核心判断 → 评论区结构（主/反/次叙事分组）→ 核心矛盾 → 用户群体 → 为什么会产生这种讨论 → 信号/噪声 → 对内容研究意味着什么 → 可验证假设 → 用户需求 → 不确定性 → 下一步研究 → 原始分析（旧分类段完整保留可折叠）；ConfidenceBadge / NarrativeItem / RefsRow；旧记录继续可读 | `UI-ORDER-001`（锚点保留） |
+| 5 | AI-META 元数据修复 | `CommentAnalysis` 新增 `auditId` → `AIAnalysis.id`；`loadStoredReport` 经审计行恢复真实 model / durationMs（含 `__meta.totalDurationMs`）/ requestCount / repaired / 引用审计；旧记录（无 auditId）如实显示占位值，绝不编造；repo 补 `aiAnalysisRepo.get(id)` | `AI-META-001..003` |
+| 6 | 引用审计全覆盖 | `auditCitations` 与 UI 高亮共用 `forEachResultRefs`，覆盖全部 8 类研究字段；`claimsWithoutCitation` 统计 claims/mechanisms/contentImplications 中空 refs 条目 | 引用审计测试（GOOD totalCitations=8） |
+
+### 关键不变量（V3.2.0 后成立）
+
+- V3.1.1 全部不变量继续成立（探针旁路诊断、暂停恢复、指纹冻结、时长策略 8 档默认不限制、零身份 prompt、citationMap 只在本地）。
+- **统计与抽样分区不变**：采集 N 条 → `stats.total=N` → `sample ≤ sampleLimit`；唯一 slice 仍在 `comment-prep.ts buildSample()`。
+- **`CommentAnalysis.analysisResult` 仍是 UI 唯一产品结果**；`rawResponse` 仅审计；失败零落库；AI 失败不清空上次成功。
+- **研究判断必须有引用**：所有研究字段 ref 走匿名 `C001` 语义，真实 rpid/mid/uname 零外发。
+- **反幽灵成功三防线**：结构签名前置 + superRefine 全空拒绝 + V3.2.0 新增「研究判断字段至少一个非空」。
+- 版本号六处对齐 `3.2.0`。
+
+### 门禁实测结果（本地，2026-09-29）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| test | `vitest run` | **PASS** 434 passed / 2 skipped / 0 failed（41 文件，较 V3.1.1 基线 421/2 +13 测试 +1 文件：`meta-persistence.test.ts` 等） |
+| typecheck | `tsc --noEmit` | PASS（EXIT=0，canary 正控验证 ×3：CANARY_EXIT=2 / REAL_EXIT=0） |
+| lint | `eslint src tests` | PASS（EXIT=0） |
+| build | `vite build` | PASS（EXIT=0，3.02s，dist manifest=3.2.0） |
+| test:dist | `node scripts/test-dist.mjs` | PASS（EXIT=0，严格模式） |
+| scan-secrets | `node scripts/scan-secrets.mjs` | PASS（EXIT=0，0 泄漏） |
+| verify-acceptance | `verify-acceptance.ts` | PASS（TEST 001–009 全过；TEST 008 fixture 迁移至 V3.2.0 研究契约；TEST 010/011 按设计 commit 后执行） |
+
+### 真实性边界（本审计不粉饰）
+
+- 真实 Provider 端到端（真实 Key + 真实模型输出新研究契约）未在本轮执行 → **REAL AI ENVIRONMENT LIMITED**；
+  契约正确性由离线 schema/orchestrator/prompt/验收测试锁定；真实模型的字段填满率与输出质量待用户实测。
+- Chrome E2E 沿用 V0.2.2 结论：本机命令行不加载未打包扩展 → `CHROME_E2E_ENV_LIMITED`（≠ FAIL），需手工 `chrome://extensions` 加载 `dist/` 复核。
 
 ---
 

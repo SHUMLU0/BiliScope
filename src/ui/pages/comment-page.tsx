@@ -7,7 +7,7 @@ import { orchestrateCommentAnalysis } from '@ai/orchestrator';
 import { loadIdleTimeoutAsync } from '@ai/settings';
 import { describeProbeStatus } from '@ai/probe';
 import { describeFailure, type AIFailureInfo } from '@ai/failures';
-import type { CommentAIResult } from '@ai/schemas';
+import { forEachResultRefs, type CommentAIResult } from '@ai/schemas';
 import type { StreamProgress } from '@ai/types';
 import { CommentAIReport, AIFailureNotice } from '../components/CommentAIReport';
 import { computeCommentStats, countKeywords, topComments } from '@services/analytics';
@@ -36,6 +36,19 @@ interface StoredReport {
    * ⚠️ 绝不从 `rawResponse` 里取 —— 那是 Provider 原始响应，不是业务结果。
    */
   analysisResult: CommentAIResult | null;
+}
+
+/**
+ * V3.2.0 · AI-META：AI 分析元数据展示行（refresh 后经 auditId 从审计行恢复）。
+ * 旧记录（无 auditId）物理上无法恢复 durationMs/requestCount —— 如实显示占位值，绝不编造。
+ */
+export interface AIMetaDisplay {
+  model: string;
+  durationMs: number;
+  requestCount: number;
+  repaired: boolean;
+  unknownRefs: string[];
+  claimsWithoutCitation: number;
 }
 
 /**
@@ -94,16 +107,7 @@ export function CommentPage() {
   const [aiBusy, setAiBusy] = useState(false);
   const [report, setReport] = useState<StoredReport | null>(null);
   const [aiFailure, setAiFailure] = useState<AIFailureInfo | null>(null);
-  const [aiMeta, setAiMeta] = useState<{
-    model: string;
-    durationMs: number;
-    requestCount: number;
-    repaired: boolean;
-    /** V3.1.0：匿名 ref 白名单审计（未知引用） */
-    unknownRefs: string[];
-    claimsWithoutCitation: number;
-    notice?: string;
-  } | null>(null);
+  const [aiMeta, setAiMeta] = useState<AIMetaDisplay | null>(null);
   const [history, setHistory] = useState<AIAnalysis[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [highlightRpid, setHighlightRpid] = useState<string | null>(null);
@@ -134,7 +138,15 @@ export function CommentPage() {
     return () => clearInterval(id);
   }, [aiBusy]);
 
-  /** 读取最新一条已落库的 AI 产品结果（刷新后仍可见） */
+  /**
+   * 读取最新一条已落库的 AI 产品结果（刷新后仍可见）。
+   *
+   * V3.2.0 · AI-META 修复：旧实现把 durationMs / requestCount 硬编码为 0，
+   * 导致「真实成功 180000ms / 2 次请求，refresh 后显示 0ms / 0 次请求」。
+   * 现在经 `CommentAnalysis.auditId` 关联审计行（AIAnalysis），
+   * 恢复 model / durationMs / requestCount / repaired / 引用审计等真实元数据；
+   * 旧记录（无 auditId）物理上无法恢复，如实显示占位值，绝不编造。
+   */
   const loadStoredReport = useCallback(async (videoId: string): Promise<void> => {
     const list = await commentAnalysisRepo.listByVideo(videoId);
     const latest = list[0];
@@ -146,15 +158,38 @@ export function CommentPage() {
     // 绝不再把 rawResponse（Provider 原始响应）当作业务结果 —— 那是 V3.0.0 的语义错位缺陷。
     const analysisResult = (latest.analysisResult ?? null) as CommentAIResult | null;
     setReport({ record: latest, analysisResult });
-    // 引用完整性：从落库文本反推（产品结果只保留渲染后的引用）
-    setAiMeta({
+    // V3.2.0 · AI-META：auditId → AIAnalysis 审计行 → 恢复真实元数据
+    let meta: AIMetaDisplay = {
       model: latest.model,
       durationMs: 0,
       requestCount: 0,
       repaired: false,
       unknownRefs: [],
       claimsWithoutCitation: 0,
-    });
+    };
+    if (latest.auditId) {
+      const audit = await aiAnalysisRepo.get(latest.auditId);
+      if (audit) {
+        const parsed = (audit.parsedResult ?? {}) as Record<string, unknown>;
+        const m = (parsed.__meta ?? {}) as Record<string, unknown>;
+        const citations = (m.citations ?? {}) as {
+          unknownRefs?: string[];
+          claimsWithoutCitation?: number;
+        };
+        meta = {
+          model: audit.model || latest.model,
+          durationMs:
+            typeof m.totalDurationMs === 'number'
+              ? m.totalDurationMs
+              : audit.durationMs,
+          requestCount: typeof m.requestCount === 'number' ? m.requestCount : 1,
+          repaired: m.repaired === true,
+          unknownRefs: citations.unknownRefs ?? [],
+          claimsWithoutCitation: citations.claimsWithoutCitation ?? 0,
+        };
+      }
+    }
+    setAiMeta(meta);
   }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -306,13 +341,17 @@ export function CommentPage() {
           videoId: snap.videoId,
           createdAt: new Date().toISOString(),
           model: r.usedConfig.model,
-          factSummary: r.data.facts.join('\n'),
-          themeResult: r.data.themes.map((t) => t.name),
+          // V3.2.0 · AI-META：内存记录同样关联审计行（refresh 后按库内记录恢复）
+          auditId: r.audit.id,
+          factSummary: r.data.relevantFacts.join('\n'),
+          themeResult: r.data.narratives.map((n) => `[${n.role}] ${n.name}`),
           sentimentResult: { positive: 0, neutral: 0, negative: 0 },
           userNeedResult: r.data.needs,
           questionResult: r.data.questions,
-          supportResult: r.data.support.map((c) => c.statement),
-          oppositionResult: r.data.opposition.map((c) => c.statement),
+          supportResult: r.data.tensions.map(
+            (t) => `${t.statement} ｜ A 方：${t.sideA} ｜ B 方：${t.sideB}`,
+          ),
+          oppositionResult: [],
           citedCommentRpids: r.citations.totalCitations ? [] : [],
           uncertaintyNote: r.data.uncertainty.join('\n'),
           // V3.1.0 · P0-AI 隐私化：内存里的产品结果也带映射（DB 记录由 orchestrate 落库）
@@ -496,7 +535,9 @@ export function CommentPage() {
   }, [comments, filter, sortKey]);
 
   /** 只有被 AI 引用到的评论置顶提示，方便对照。
-   *  V3.1.0：AI 结果里是匿名 ref —— 先经本地 citationMap 回溯成真实 rpidStr 再比对。 */
+   *  V3.1.0：AI 结果里是匿名 ref —— 先经本地 citationMap 回溯成真实 rpidStr 再比对。
+   *  V3.2.0：主口径走 forEachResultRefs（覆盖全部研究字段）；
+   *  旧记录（V3.1.x 及更早的 themes/support/opposition/findings）做防御性兜底扫描。 */
   const citedSet = useMemo(() => {
     const r = report?.analysisResult;
     if (!r) return new Set<string>();
@@ -505,10 +546,15 @@ export function CommentPage() {
     const add = (refs: string[]): void => {
       for (const x of refs) s.add(map[x] ?? x);
     };
-    for (const c of r.support) add(c.refs);
-    for (const c of r.opposition) add(c.refs);
-    for (const t of r.themes) add(t.refs);
-    for (const f of r.findings) add(f.evidenceRefs);
+    forEachResultRefs(r, add);
+    // 旧字段兜底（新 schema 已移除，仅历史记录可能存在）
+    const legacy = r as unknown as Record<string, unknown>;
+    const legacyRefs = (v: unknown): string[] =>
+      Array.isArray(v) ? (v as { refs?: unknown }[]).flatMap((e) => (e && typeof e === 'object' && Array.isArray(e.refs) ? (e.refs as string[]) : [])) : [];
+    add(legacyRefs(legacy.themes));
+    add(legacyRefs(legacy.support));
+    add(legacyRefs(legacy.opposition));
+    add(legacyRefs(legacy.findings));
     return s;
   }, [report]);
 

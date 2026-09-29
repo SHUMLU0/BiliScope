@@ -90,29 +90,68 @@ describe('prompts · Creator / Video', () => {
   });
 });
 
-describe('prompts · Comment（V3.0 单 schema + V3.1 匿名引用）', () => {
+describe('prompts · Comment（V3.2 Research Analyst 单 schema + 匿名引用）', () => {
   it('declares EXACTLY ONE schema — no contradictory second schema', () => {
     const { system } = buildCommentAnalyzePrompt({ sample });
-    // 新 schema 的全部顶层字段必须出现
+    // V3.2.0 研究契约的全部顶层字段必须出现
     for (const field of [
       'summary',
-      'facts',
-      'findings',
-      'themes',
-      'support',
-      'opposition',
+      'relevantFacts',
+      'narratives',
+      'audienceSegments',
+      'tensions',
+      'mechanisms',
+      'signalVsNoise',
+      'contentImplications',
+      'claims',
       'needs',
       'questions',
       'uncertainty',
+      'hypothesesToTest',
       'nextResearch',
     ]) {
       expect(system).toContain(field);
     }
-    // 旧的、互相冲突的字段不得再出现
+    // 旧的、已移除的分类字段不得再作为顶层 schema 出现
+    expect(system).not.toContain('"facts"');
+    expect(system).not.toContain('"findings"');
+    expect(system).not.toContain('"themes"');
+    expect(system).not.toContain('"support"');
+    expect(system).not.toContain('"opposition"');
     expect(system).not.toContain('"explanations"');
     expect(system).not.toContain('"evidence": {');
     // 不得再声明两套 schema（"必须分三段输出" 是旧矛盾来源）
     expect(system).not.toMatch(/必须分三段输出/);
+  });
+
+  it('AI-RESEARCH prompt: first principle + twelve questions + no restating', () => {
+    const { system } = buildCommentAnalyzePrompt({ sample });
+    // 第一原则：任务是重建观点结构，不是分类
+    expect(system).toMatch(/研究分析师|Research Analyst/);
+    expect(system).toMatch(/重建评论区的观点结构/);
+    // 禁止「高级复述」：只改写原文不算分析
+    expect(system).toMatch(/高级复述/);
+    // 叙事结构 / 用户分群 / 信号噪声 / 机制 / 假设 五大研究动作必须出现
+    expect(system).toMatch(/主叙事/);
+    expect(system).toMatch(/反叙事/);
+    expect(system).toMatch(/用户群体|分群/);
+    expect(system).toMatch(/信号/);
+    expect(system).toMatch(/可验证假设/);
+    // 输出预算（防 token 膨胀）
+    expect(system).toMatch(/1500–3000|3000–5000/);
+  });
+
+  it('AI-RESEARCH-006: causal language is constrained (correlation ≠ causation)', () => {
+    const { system } = buildCommentAnalyzePrompt({ sample });
+    expect(system).toMatch(/可能机制/);
+    expect(system).toMatch(/确定因果/);
+    expect(system).toMatch(/词频/);
+    expect(system).toMatch(/因果/);
+  });
+
+  it('AI-RESEARCH-009: relevantFacts must not restate the stats block', () => {
+    const { system } = buildCommentAnalyzePrompt({ sample });
+    expect(system).toMatch(/复述.*统计块|统计块.*复述|已完整给出/);
   });
 
   it('states the schema only once (no duplicated schema blocks)', () => {
@@ -121,11 +160,11 @@ describe('prompts · Comment（V3.0 单 schema + V3.1 匿名引用）', () => {
     expect(occurrences).toBe(1);
   });
 
-  it('requires anonymous ref citations (refs) for support / opposition', () => {
+  it('requires anonymous ref citations (refs) for research fields', () => {
     const { system } = buildCommentAnalyzePrompt({ sample });
     expect(system).toMatch(/refs/);
-    expect(system).toMatch(/support/);
-    expect(system).toMatch(/opposition/);
+    expect(system).toMatch(/narratives/);
+    expect(system).toMatch(/tensions/);
   });
 
   it('forbids the exact phrasing the user listed', () => {

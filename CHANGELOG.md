@@ -2,6 +2,55 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/) 规范。
 
+## [V3.2.0] - 2026-09-29
+
+**Comment Research Analyst（评论研究分析师）**：评论 AI 从「评论整理器」升级为
+「研究分析师」——不再只分类与复述评论，而是**重建评论区的观点结构**，
+解释讨论为何形成、如何冲突、对内容研究意味着什么。
+**不重写采集层 / CommentCollector / WBI / Dexie，不删历史数据与审计。**
+
+### Changed
+
+- **研究契约重写（`src/ai/schemas.ts`）**：评论领域 schema 从「分类整理」升级为
+  「研究判断」——新增 `narratives`（叙事结构，主/次/反，≤6）、`audienceSegments`
+  （用户分群，≤5）、`tensions`（核心矛盾 + 双方立场，≤5）、`mechanisms`（可能机制
+  + 因果纪律 + confidence，≤5）、`signalVsNoise`（信号/噪声 + reason 必填，≤8）、
+  `contentImplications`（对内容研究意味着什么，≤5）、`claims`（可核查论断 +
+  confidence，≤8）、`hypothesesToTest`（假设→支持→反证→缺失证据→验证方法，≤5）；
+  旧 `facts` 由 `relevantFacts`（≤5）取代，禁止复述 UI 已展示的统计块数字。
+- **Prompt 第一原则（`src/ai/prompts.ts`）**：任务是重建观点结构，不是分类评论；
+  新增 12 问研究框架、「高级复述」禁令、因果措辞纪律（「可能机制」措辞、
+  相关 ≠ 因果、禁止无证据全称判断）、输出预算（核心报告 1500–3000 tokens，
+  复杂 200 条样本 3000–5000 tokens）、证据不足时数组留空合法（质量优先于字段填满率）。
+- **UI 重构为研究报告（`CommentAIReport.tsx`）**：段落顺序改为
+  核心判断 → 评论区结构（主/反/次叙事分组）→ 核心矛盾 → 用户群体 →
+  为什么会产生这种讨论 → 信号/噪声 → 对内容研究意味着什么 → 可验证假设 →
+  用户需求 → 不确定性 → 下一步研究 → 原始分析（旧分类段完整保留可折叠）。
+  旧记录（V3.1.x 及更早）继续可读，绝不反推、绝不丢弃。
+
+### Fixed
+
+- **0ms / 0 次请求元数据 bug（AI-META-001..003）**：刷新页面后 AI 报告的
+  `durationMs` / `requestCount` / `model` / `repaired` 曾被硬编码归零。
+  现在 `CommentAnalysis` 新增 `auditId` 关联审计行（`AIAnalysis.id`），
+  刷新后经审计行恢复真实 `model / durationMs（含 totalDurationMs）/ requestCount /
+  repaired / 引用审计`；旧记录（无 auditId）如实显示占位值，绝不编造。
+
+### Improved
+
+- **引用审计全覆盖（`forEachResultRefs`）**：引用审计与 UI 高亮共用一个遍历器，
+  覆盖全部 8 类研究字段的 ref 数组（narratives / audienceSegments / tensions /
+  mechanisms / signalVsNoise / contentImplications / claims / hypothesesToTest），
+  `claimsWithoutCitation` 同步统计无引用的论断条目。
+- **防「幽灵成功」升级**：schema 层新增硬约束——七个研究判断字段
+  （narratives / tensions / mechanisms / signalVsNoise / contentImplications /
+  claims / hypothesesToTest）至少一个非空，纯事实复述输出直接被 Zod 拒绝
+  （AI-RESEARCH-001/002 在 schema 层锁定）。
+- **新增测试**：`AI-RESEARCH-001..009`（模型不得只输出事实复述；分析判断必须带
+  evidenceRefs；narratives 必须匿名引用；tensions 至少一侧有证据；mechanism 必须
+  有 confidence；因果措辞约束；signal/noise 必须有 reason；假设必须含缺失证据或
+  验证方法；不得复述统计块）+ `AI-META-001..003`（元数据刷新不丢失）。
+
 ## [V3.1.1] - 2026-09-29
 
 **Probe 旁路诊断 + AI 暂停恢复**：拆除 Probe「看门人」——探针只做旁路诊断，

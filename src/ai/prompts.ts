@@ -1,16 +1,20 @@
 /**
- * AI 分析 prompt 模板（V3.0 重写）。
+ * AI 分析 prompt 模板（V3.0 重写；V3.2.0 评论领域升级为 Research Analyst）。
  *
  * ⚠️ V3.0 修复的核心矛盾（第九节）：
- *   旧 `SCHEMA_NOTE` 声明 `{facts, explanations, evidence, uncertainty, nextResearch}`，
- *   而 `buildCommentAnalyzePrompt` 又额外要求 `support` / `opposition` 带 rpid ——
- *   **同一个 system prompt 里塞了两套互相矛盾的 schema**，模型只能二选一或拼凑，
- *   这就是「AI 返回残缺 JSON」的直接来源之一。
+ *   旧 `SCHEMA_NOTE` 与 `buildCommentAnalyzePrompt` 塞了两套互相矛盾的 schema，
+ *   模型只能二选一或拼凑 —— 这是「AI 返回残缺 JSON」的直接来源之一。
  *
  * 现在：
  *  - 每个领域**只声明一套 schema**，且与 `src/ai/schemas.ts` 的 Zod 定义逐字对应。
- *  - schema 文本由 `describeSchema()` 从字段常量生成，避免 prompt 与 Zod 漂移。
- *  - 评论 prompt 只负责「约束」，不再自行发明字段。
+ *  - schema 文本由字段常量生成，避免 prompt 与 Zod 漂移。
+ *
+ * V3.2.0（Comment Research Analyst）：
+ *  - 评论 prompt 的任务定义从「整理评论」升级为「重建评论区观点结构并解释其成因与含义」。
+ *  - 新增：叙事结构（主/次/反）、用户分群、核心矛盾、可能机制（因果纪律）、
+ *    信号/噪声、内容价值、可验证假设（假设→证据→反证→验证方法）。
+ *  - 禁止「高级复述」：只改写原文不算分析；质量优先于字段填满率。
+ *  - 输出预算：核心报告 1500–3000 tokens；复杂样本 3000–5000 tokens。
  */
 
 import type { Creator, CreatorSnapshot, Video, VideoSnapshot } from '@models/index';
@@ -24,29 +28,77 @@ import type { SampleComment } from '@services/comment-prep';
 const COMMENT_SCHEMA_TEXT = `
 你必须**只**输出一个 JSON 对象，结构如下（不得增删顶层字段名）：
 {
-  "summary": string,            // 核心结论，一句话；不得引入下方未出现的新事实
-  "facts": string[],            // 客观事实：只能来自给定的「客观统计事实」块或样本原文
-  "findings": [                 // 你的**解释性**判断
+  "summary": string,            // 核心判断：这批评论整体意味着什么（不是摘要）
+  "relevantFacts": string[],    // 相关事实，最多 5 条：只写对研究判断有用的客观事实；
+                                // 禁止复述「客观统计事实」块已完整给出的数字（总数 / 时间跨度 / 最高赞 / 样本条数）
+  "narratives": [               // 叙事结构，最多 6 条：把评论重建为观点阵营
     {
-      "type": "theme" | "painpoint" | "emotion" | "controversy" | "behavior",
-      "statement": string,      // 一句可独立阅读的判断
-      "evidenceRefs": string[]  // 支撑该判断的评论引用（形如 C001）；没有证据就写 []
+      "name": string,           // 叙事名称
+      "description": string,    // 这个阵营在说什么、如何形成
+      "role": "primary" | "secondary" | "counter",   // 主叙事 / 次叙事 / 反叙事
+      "refs": string[]          // 引用样本评论（形如 C001）
     }
   ],
-  "themes": [                   // 评论中反复出现的主题
-    { "name": string, "refs": string[] }   // refs = 对应主题的评论引用（形如 C001）
+  "audienceSegments": [         // 用户群体，最多 5 条：按需求与行为分群，不是按词频分组
+    {
+      "name": string,
+      "need": string,           // 这个群体想要什么
+      "behavior": string,       // 他们在评论里实际做了什么
+      "refs": string[]
+    }
   ],
-  "support": [                  // 支持 / 正面观点
-    { "statement": string, "refs": string[] }   // 必须引用样本中真实出现过的 ref
+  "tensions": [                 // 核心矛盾，最多 5 条：真实存在的立场冲突
+    {
+      "statement": string,      // 矛盾是什么
+      "sideA": string,          // A 方观点（需有 refs 支撑）
+      "sideB": string,          // B 方观点（需有 refs 支撑）
+      "refs": string[]
+    }
   ],
-  "opposition": [               // 质疑 / 反对观点
-    { "statement": string, "refs": string[] }   // 必须引用样本中真实出现过的 ref
+  "mechanisms": [               // 为什么会产生这种讨论，最多 5 条：可能机制（因果纪律：只能假设）
+    {
+      "hypothesis": string,     // 机制假设（用「可能」措辞）
+      "explanation": string,    // 解释该机制如何把评论内容与讨论形态联系起来
+      "evidenceRefs": string[], // 证据评论引用；没有就 []
+      "confidence": "low" | "medium" | "high"
+    }
+  ],
+  "signalVsNoise": [            // 信号 / 噪声，最多 8 条：区分有信息量的评论与干扰项
+    {
+      "type": "signal" | "noise",
+      "statement": string,      // 该条评论（类）说了什么
+      "reason": string,         // 为什么是信号 / 为什么是噪声（必填）
+      "refs": string[]
+    }
+  ],
+  "contentImplications": [      // 对内容研究意味着什么，最多 5 条
+    {
+      "insight": string,        // 洞察
+      "basisRefs": string[],    // 依据的评论引用
+      "implication": string     // 对后续内容 / 研究的可操作含义
+    }
+  ],
+  "claims": [                   // 可核查论断，最多 8 条：评论中可被事实检验的说法
+    { "statement": string, "refs": string[], "confidence": "low" | "medium" | "high" }
+  ],
+  "hypothesesToTest": [         // 可验证假设，最多 5 条：假设 → 支持 → 反证 → 缺什么 → 怎么验证
+    {
+      "hypothesis": string,
+      "evidenceForRefs": string[],
+      "evidenceAgainstRefs": string[],
+      "missingEvidence": string[],   // 缺失的证据
+      "testMethod": string           // 用什么数据 / 方法验证（必填）
+    }
   ],
   "needs": string[],            // 用户需求（要说明依据了哪些评论样本）
   "questions": string[],        // 高频问题
   "uncertainty": string[],      // 不确定性：必须写明样本量 / 清洗影响 / 抽样偏差 / 数据完整性
   "nextResearch": string[]      // 下一步该采集什么数据（不得写成结论）
 }
+
+质量纪律：宁可少而准，不要凑数——证据不足的数组留空 [] 是合法输出；
+绝不为了填字段而输出空泛的复述。七个研究判断字段（narratives / tensions / mechanisms /
+signalVsNoise / contentImplications / claims / hypothesesToTest）至少一个必须非空。
 `;
 
 /** 创作者 / 视频领域 schema 的 prompt 表述（与 generalAIResultSchema 一致） */
@@ -68,12 +120,33 @@ const ANTI_FABRICATION = [
   '禁止把词频当成因果：出现次数多 ≠ 是原因。',
 ];
 
-/** 评论领域专用禁用语（第九节明列） */
+/** 评论领域专用禁用语（V3.2.0 Research Analyst 纪律） */
 const COMMENT_FORBIDDEN = [
   '禁止使用"大多数用户都…""用户普遍…""观众一定…""这个视频导致…"这类无证据的全称判断。',
-  '禁止在 support / opposition 中给出不带 refs 引用的观点。',
-  '禁止从词频直接推导因果。',
+  'narratives / tensions / claims / mechanisms / signalVsNoise / contentImplications / hypothesesToTest 的每一项都应引用样本中真实出现过的匿名 ref；确实无法引用时留空数组并在 uncertainty 说明，绝不凭空断言。',
+  '禁止从词频直接推导因果；禁止把"相关"写成"因果"（当前数据没有实验设计证明因果）。',
   '禁止在 nextResearch 里写结论——那里只能写"还需要采集什么数据"。',
+  '禁止"高级复述"：仅仅改写或归纳原始评论（如"很多人认为X"）不算分析；每个判断必须给出判断、解释关系、提供 refs、标注置信度。',
+  '禁止在 relevantFacts 里复述输入统计块已完整给出的数字（总评论数 / 时间跨度 / 最高赞 / 样本条数等 UI 已展示的内容）。',
+  '禁止为了填满字段而硬凑内容：没有足够证据时数组必须为空，质量优先于字段填满率。',
+];
+
+/** V3.2.0 · Research Analyst 任务定义（第一原则 + 十二问） */
+const RESEARCH_PRINCIPLES = [
+  '你是一名 B 站评论区研究分析师（Comment Research Analyst），不是评论摘要器。',
+  '【第一原则】不要把任务理解成"把评论分类"。你的任务是：从评论样本中重建评论区的观点结构，' +
+    '并解释为什么这些观点会形成、彼此冲突、产生互动，以及这些讨论对内容研究意味着什么。',
+  '你必须尝试回答：评论区真正围绕什么问题；表面主题下面的核心叙事是什么；哪些观点属于主叙事、' +
+    '哪些属于反叙事；用户之间真正冲突在哪里；哪些评论只是情绪/玩梗、哪些包含真正的信息信号；' +
+    '有哪些可能的互动驱动机制；不同用户群体在关注什么；这条内容真正满足了什么需求；' +
+    '哪些判断目前证据不足；最值得验证的假设是什么。',
+  '叙事结构：必须尝试区分主叙事（primary）、次叙事（secondary）与反叙事（counter），并用样本 refs 支撑。',
+  '用户分群：尝试区分情绪参与者 / 反叙事参与者 / 信息求证者 / 实用信息需求者 / 比较型用户 / 玩梗用户；' +
+    '样本无法可靠区分某群体时如实写明，禁止强行编造。',
+  '信号/噪声：噪声 = 只承担情绪表态、不提供新事实或逻辑的评论；信号 = 提出新事实、新逻辑或真问题的评论。每条判定必须给 reason。',
+  '机制分析：只能写"可能机制"，用置信度标注不确定性；禁止把机制写成确定因果。',
+  '可验证假设：hypothesesToTest 不是"下一步继续采集评论"，而是假设 → 支持证据 → 反证 → 目前缺失的证据 → 具体验证方法。',
+  '输出预算：常规样本核心报告约 1500–3000 tokens；约 200 条的复杂样本约 3000–5000 tokens。不要为填字段强行突破。',
 ];
 
 export interface CreatorAnalyzeCtx {
@@ -197,16 +270,15 @@ export function buildCommentAnalyzePrompt(ctx: CommentAnalyzeCtx): { system: str
   // ⚠️ 禁止 slice：样本已在 prepare 层受控。这里只做「如实投影」。
   const sample = ctx.sample;
   const system = [
-    '你是一名 B 站评论区研究分析师。你的输出会被程序用严格的结构校验，任何字段缺失或类型错误都会被判为失败。',
-    '区分主题 / 高频问题 / 支持观点 / 反对观点 / 用户痛点 / 情绪 / 争议。',
-    'facts 段只能复述给定的「客观统计事实」块，禁止编造数字。',
-    requireCitations
-      ? 'support / opposition / themes / findings 的每一项引用都必须用 "refs" 或 "evidenceRefs" 数组，' +
-        '引用值只能是样本里真实出现过的匿名 ref（形如 C001）。'
-      : '',
-    ctx.factsJson ? '系统会先给出「客观统计事实」块；你输出的 facts 必须与该块一致。' : '',
+    ...RESEARCH_PRINCIPLES,
     '你收到的 sample 是**受控抽样**（不是全部评论）。统计数字以「客观统计事实」块为准；' +
       '你只能对 sample 里的原文做解释，不得假设样本之外的内容。',
+    'relevantFacts 只能来自给定的「客观统计事实」块或样本原文，禁止编造数字；且不得复述该块已完整给出的汇总数字。',
+    requireCitations
+      ? '所有判断字段的每一项引用都必须用 refs / evidenceRefs / basisRefs / evidenceForRefs / evidenceAgainstRefs 数组，' +
+        '引用值只能是样本里真实出现过的匿名 ref（形如 C001）。'
+      : '',
+    ctx.factsJson ? '系统会先给出「客观统计事实」块；relevantFacts 必须与该块一致。' : '',
     ...COMMENT_FORBIDDEN,
     ...ANTI_FABRICATION,
     // ⚠️ 只声明一套 schema —— 与 src/ai/schemas.ts 逐字对应

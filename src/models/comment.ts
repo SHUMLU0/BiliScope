@@ -82,6 +82,13 @@ export const commentAnalysisSchema = z.object({
   videoId: nonEmpty,
   createdAt: isoString,
   model: z.string().min(1),
+  /**
+   * V3.2.0 · AI-META：本次分析 Main 请求的审计行（AIAnalysis.id）。
+   * UI refresh 后经 auditId 关联审计行，恢复真实 durationMs / requestCount /
+   * repaired / tokens / finishReason / provider —— 修复「refresh 后 0ms / 0 次请求」。
+   * 旧记录（V3.1.x 及更早）无此字段 → optional，UI 如实降级显示，绝不硬编码 0 冒充真实值。
+   */
+  auditId: z.string().min(1).optional(),
   // 统计事实（与 AI 推断分离）
   factSummary: z.string().max(10_000).default(''),
   themeResult: z.array(z.string()).default([]),

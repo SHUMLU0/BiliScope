@@ -43,14 +43,41 @@ function saveCfg(): void {
 
 const GOOD: CommentAIResult = {
   summary: '评论区以正面为主',
-  facts: ['样本 3 条'],
-  findings: [{ type: 'theme', statement: '画质被讨论', evidenceRefs: ['C001'] }],
-  themes: [{ name: '画质', refs: ['C001'] }],
-  support: [{ statement: '认可画质', refs: ['C001'] }],
-  opposition: [{ statement: '更新慢', refs: ['C002'] }],
+  relevantFacts: ['高赞评论集中于画质讨论'],
+  narratives: [
+    { name: '画质认可', description: '高赞评论把画质视为核心优点', role: 'primary', refs: ['C001'] },
+  ],
+  audienceSegments: [],
+  tensions: [
+    { statement: '画质升级是否值得', sideA: '认可画质', sideB: '认为更新慢', refs: ['C001', 'C002'] },
+  ],
+  mechanisms: [
+    {
+      hypothesis: '画质对比可能是互动的主要驱动之一',
+      explanation: '高互动样本集中于画质讨论而非其他话题',
+      evidenceRefs: ['C001'],
+      confidence: 'medium',
+    },
+  ],
+  signalVsNoise: [
+    { type: 'signal', statement: '画质被讨论', reason: '该评论提供具体的画质对比信息', refs: ['C001'] },
+  ],
+  contentImplications: [
+    { insight: '互动主要由画质对比驱动', basisRefs: ['C001'], implication: '后续内容可延续画质对比角度' },
+  ],
+  claims: [{ statement: '认可画质', refs: ['C001'], confidence: 'medium' }],
   needs: ['提高更新频率'],
   questions: ['下期何时出'],
   uncertainty: ['样本量小'],
+  hypothesesToTest: [
+    {
+      hypothesis: '画质讨论驱动互动',
+      evidenceForRefs: ['C001'],
+      evidenceAgainstRefs: [],
+      missingEvidence: ['跨视频对比样本'],
+      testMethod: '对同主题 5 个视频采集相同样本，比较画质讨论引用比例',
+    },
+  ],
   nextResearch: ['补充二级回复'],
 };
 

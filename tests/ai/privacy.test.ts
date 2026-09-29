@@ -150,17 +150,40 @@ function saveCfg(): void {
   );
 }
 
-/** AI 返回的匿名引用结果（ref 语义：refs / evidenceRefs） */
+/** AI 返回的匿名引用结果（ref 语义：全研究字段 refs / evidenceRefs / basisRefs） */
 const AI_RESULT_WITH_REFS = JSON.stringify({
   summary: '评论区以画质与更新频率讨论为主',
-  facts: ['样本 2 条'],
-  findings: [{ type: 'theme', statement: '画质被讨论', evidenceRefs: ['C001'] }],
-  themes: [{ name: '画质', refs: ['C001'] }],
-  support: [{ statement: '认可画质', refs: ['C001'] }],
-  opposition: [{ statement: '更新慢', refs: ['C002'] }],
+  relevantFacts: ['高赞评论集中于画质讨论'],
+  narratives: [{ name: '画质认可', description: '高赞评论把画质视为核心优点', role: 'primary', refs: ['C001'] }],
+  audienceSegments: [],
+  tensions: [{ statement: '画质升级是否值得', sideA: '认可画质', sideB: '认为更新慢', refs: ['C001', 'C002'] }],
+  mechanisms: [
+    {
+      hypothesis: '画质对比可能是互动的主要驱动之一',
+      explanation: '高互动样本集中于画质讨论而非其他话题',
+      evidenceRefs: ['C001'],
+      confidence: 'medium',
+    },
+  ],
+  signalVsNoise: [
+    { type: 'signal', statement: '画质被讨论', reason: '该评论提供具体的画质对比信息', refs: ['C001'] },
+  ],
+  contentImplications: [
+    { insight: '互动主要由画质对比驱动', basisRefs: ['C001'], implication: '后续内容可延续画质对比角度' },
+  ],
+  claims: [{ statement: '认可画质', refs: ['C001'], confidence: 'medium' }],
   needs: ['提高更新频率'],
   questions: ['下期何时出'],
   uncertainty: ['样本量小'],
+  hypothesesToTest: [
+    {
+      hypothesis: '画质讨论驱动互动',
+      evidenceForRefs: ['C001'],
+      evidenceAgainstRefs: [],
+      missingEvidence: ['跨视频对比样本'],
+      testMethod: '对同主题 5 个视频采集相同样本，比较画质讨论引用比例',
+    },
+  ],
   nextResearch: ['补充二级回复'],
 });
 
@@ -208,7 +231,7 @@ describe('AI-PRIVACY-002 · C001 → 真实 rpid 本地回溯', () => {
     expect(stored!.citationMap['C001']).toBe(REAL_RPID);
     expect(stored!.citationMap['C002']).toBe(REAL_RPID_2);
     // 产品结构（analysisResult）保持 ref 语义（AI 结构原样）
-    expect(stored!.analysisResult?.support[0]?.refs).toEqual(['C001']);
+    expect(stored!.analysisResult?.narratives[0]?.refs).toEqual(['C001']);
   });
 });
 
@@ -238,7 +261,7 @@ describe('AI-PRIVACY-003 · 历史 reload 后 citationMap 仍可用', () => {
     expect(map['C001']).toBe(REAL_RPID);
     expect(map['C002']).toBe(REAL_RPID_2);
     // analysisResult 里的 refs 全部能在 citationMap 中解析
-    for (const ref of row!.analysisResult?.support[0]?.refs ?? []) {
+    for (const ref of row!.analysisResult?.narratives[0]?.refs ?? []) {
       expect(map[ref]).toBeTruthy();
     }
   });

@@ -1,7 +1,27 @@
-# BiliScope V3.1.1 进度表
+# BiliScope V3.2.0 进度表
 
 > 唯一进度表（Single Source of Truth）。
 > 状态：✅ 完成 / 🔄 进行中 / ⏸ 阻塞 / ⬜ 未开始
+
+---
+
+## V3.2.0 「Comment Research Analyst（评论研究分析师）」
+
+> 定位：评论 AI 从「评论整理器」升级为「研究分析师」——不再只分类与复述评论，
+> 而是**重建评论区的观点结构**，解释讨论为何形成、如何冲突、对内容研究意味着什么。
+> 不重写采集层 / CommentCollector / WBI / Dexie，不删历史数据与历史审计。
+
+| 编号 | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **R-1** | 研究契约重写（schemas.ts） | ✅ | 新增 narratives（主/次/反 ≤6）/ audienceSegments（≤5）/ tensions（双方立场 ≤5）/ mechanisms（+confidence ≤5）/ signalVsNoise（reason 必填 ≤8）/ contentImplications（≤5）/ claims（+confidence ≤8）/ hypothesesToTest（含 missingEvidence+testMethod ≤5）；`facts`→`relevantFacts`（≤5 禁复述统计块）；`forEachResultRefs` 统一 8 类 ref 数组遍历；防幽灵成功升级：七个研究判断字段至少一个非空 |
+| **R-2** | Prompt 第一原则（prompts.ts） | ✅ | 「重建观点结构，不是分类评论」+ 12 问研究框架；「高级复述」禁令；因果措辞纪律（可能机制 / 相关≠因果 / 禁无证据全称判断）；输出预算 1500–3000（复杂 3000–5000）tokens；COMMENT_SCHEMA_TEXT 与 Zod 逐字对应 |
+| **R-3** | UI 重构为研究报告（CommentAIReport.tsx） | ✅ | 核心判断 → 评论区结构（主/反/次分组）→ 核心矛盾 → 用户群体 → 成因机制 → 信号/噪声 → 内容研究含义 → 可验证假设 → 用户需求 → 不确定性 → 下一步研究 → 原始分析（旧分类段保留可折叠，旧记录继续可读）；ConfidenceBadge / NarrativeItem / RefsRow |
+| **R-4** | AI-META 元数据修复 | ✅ | `CommentAnalysis.auditId` → `AIAnalysis.id`；`loadStoredReport` 经审计行恢复真实 model / durationMs（含 totalDurationMs）/ requestCount / repaired / 引用审计；旧记录如实显示占位值绝不编造；repo 补 `aiAnalysisRepo.get(id)` |
+| **T-1** | AI-RESEARCH-001..009 | ✅ | 模型不得只输出事实复述（schema 层拒绝）；分析判断必须带 evidenceRefs；narratives 匿名引用；tensions 至少一侧有证据；mechanism 必须 confidence；因果措辞约束；signal/noise 必须有 reason；假设必须含缺失证据或验证方法；不得复述统计块 |
+| **T-2** | AI-META-001..003 | ✅ | `tests/ai/meta-persistence.test.ts`：元数据刷新不丢失 / durationMs>0 保留 / requestCount（含 repair=2）保留 |
+| **T-3** | 存量测试迁移 | ✅ | orchestrator / schemas / prompts / fingerprint / probes / pause / timeout / privacy fixtures 全部迁移到 V3.2.0 契约；引用审计测试重写（GOOD totalCitations=8） |
+| **D** | 文档同步 | ✅ | 六处对齐 `3.2.0`；README 当前版本 + 版本历程 V3.2.0 行；CHANGELOG 新段；DEPLOYMENT 版本段重写；docs-consistency 升级 3.2.0 契约（保留 V3.1.1 历史断言） |
+| **G** | 门禁链 | ✅ | 本地 7 项全绿：typecheck（canary 正控 ×3：CANARY=2/REAL=0）/ lint 0 错 / test **434 passed / 2 skipped（41 文件）** / build（3.02s，dist manifest=3.2.0）/ test:dist 严格模式 / scan-secrets 0 泄漏 / verify-acceptance TEST 001-009（TEST 008 fixture 已迁移至研究契约）→ commit → push → CI → audit ZIP 本轮最后执行（见最终报告块） |
 
 ---
 

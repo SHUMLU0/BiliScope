@@ -52,14 +52,41 @@ function saveCfg(active = 'openai-compatible', extra: Record<string, unknown> = 
 
 const GOOD: CommentAIResult = {
   summary: '评论区以正面为主',
-  facts: ['样本 3 条'],
-  findings: [{ type: 'theme', statement: '画质被讨论', evidenceRefs: ['C001'] }],
-  themes: [{ name: '画质', refs: ['C001'] }],
-  support: [{ statement: '认可画质', refs: ['C001'] }],
-  opposition: [{ statement: '更新慢', refs: ['C002'] }],
+  relevantFacts: ['高赞评论集中于画质讨论'],
+  narratives: [
+    { name: '画质认可', description: '高赞评论把画质视为核心优点', role: 'primary', refs: ['C001'] },
+  ],
+  audienceSegments: [],
+  tensions: [
+    { statement: '画质升级是否值得', sideA: '认可画质', sideB: '认为更新慢', refs: ['C001', 'C002'] },
+  ],
+  mechanisms: [
+    {
+      hypothesis: '画质对比可能是互动的主要驱动之一',
+      explanation: '高互动样本集中于画质讨论而非其他话题',
+      evidenceRefs: ['C001'],
+      confidence: 'medium',
+    },
+  ],
+  signalVsNoise: [
+    { type: 'signal', statement: '画质被讨论', reason: '该评论提供具体的画质对比信息', refs: ['C001'] },
+  ],
+  contentImplications: [
+    { insight: '互动主要由画质对比驱动', basisRefs: ['C001'], implication: '后续内容可延续画质对比角度' },
+  ],
+  claims: [{ statement: '认可画质', refs: ['C001'], confidence: 'medium' }],
   needs: ['提高更新频率'],
   questions: ['下期何时出'],
   uncertainty: ['样本量小'],
+  hypothesesToTest: [
+    {
+      hypothesis: '画质讨论驱动互动',
+      evidenceForRefs: ['C001'],
+      evidenceAgainstRefs: [],
+      missingEvidence: ['跨视频对比样本'],
+      testMethod: '对同主题 5 个视频采集相同样本，比较画质讨论引用比例',
+    },
+  ],
   nextResearch: ['补充二级回复'],
 };
 
@@ -224,8 +251,12 @@ describe('V3.0.1 · P0-2 产品结果持久化语义', () => {
     // 结构化业务结果必须落库，且内容完整可读
     expect(stored.analysisResult).toBeTruthy();
     expect(stored.analysisResult!.summary).toBe('评论区以正面为主');
-    expect(stored.analysisResult!.support[0]!.statement).toBe('认可画质');
-    expect(stored.analysisResult!.themes[0]!.name).toBe('画质');
+    expect(stored.analysisResult!.claims[0]!.statement).toBe('认可画质');
+    expect(stored.analysisResult!.narratives[0]!.name).toBe('画质认可');
+    // V3.2.0 · AI-META：产品结果必须关联 Main 审计行（refresh 后恢复真实元数据）
+    const audits = (await db.aiAnalyses.toArray()).filter((a) => a.requestType !== 'probe');
+    expect(stored.auditId).toBeTruthy();
+    expect(stored.auditId).toBe(audits[0]!.id);
 
     // rawResponse 是 Provider 原始响应（OpenAI 风格），**不是**业务结果
     const raw = stored.rawResponse as { choices?: unknown[] } | undefined;
@@ -246,10 +277,11 @@ describe('V3.0.1 · P0-2 产品结果持久化语义', () => {
     const latest = list[0]!;
     const restored = latest.analysisResult!;
     expect(restored.summary).toBe('评论区以正面为主');
-    expect(restored.support).toHaveLength(1);
-    expect(restored.opposition).toHaveLength(1);
-    expect(restored.themes).toHaveLength(1);
-    expect(restored.findings).toHaveLength(1);
+    expect(restored.narratives).toHaveLength(1);
+    expect(restored.tensions).toHaveLength(1);
+    expect(restored.claims).toHaveLength(1);
+    expect(restored.hypothesesToTest).toHaveLength(1);
+    expect(restored.hypothesesToTest[0]!.testMethod).toBe('对同主题 5 个视频采集相同样本，比较画质讨论引用比例');
     expect(restored.needs).toEqual(['提高更新频率']);
     expect(restored.questions).toEqual(['下期何时出']);
     expect(restored.uncertainty).toEqual(['样本量小']);
@@ -265,8 +297,8 @@ describe('V3.0.1 · P0-2 产品结果持久化语义', () => {
     // 旧实现会把 rawResponse 强转成 CommentAIResult —— 那样拿到的字段全是 undefined
     const wrongCast = stored.rawResponse as Record<string, unknown>;
     expect(wrongCast.summary).toBeUndefined();
-    expect(wrongCast.themes).toBeUndefined();
-    expect(wrongCast.support).toBeUndefined();
+    expect(wrongCast.tensions).toBeUndefined();
+    expect(wrongCast.claims).toBeUndefined();
     // 正确来源才有这些字段
     expect(stored.analysisResult!.summary).toBeTruthy();
   });
@@ -530,26 +562,30 @@ describe('orchestrate · Provider 不错配', () => {
   });
 });
 
-describe('引用可验证性（V3.1 匿名 ref）', () => {
+describe('引用可验证性（V3.1 匿名 ref / V3.2 全研究字段扫描）', () => {
   it('auditCitations flags refs that do not exist in the sample', () => {
     const withFake: CommentAIResult = {
       ...GOOD,
-      support: [{ statement: '有人这么说', refs: ['C001', 'C404'] }],
-      opposition: [{ statement: '无引用的论断', refs: [] }],
+      claims: [{ statement: '有人这么说', refs: ['C001', 'C404'], confidence: 'medium' }],
+      mechanisms: [
+        ...GOOD.mechanisms,
+        { hypothesis: '无引用的机制猜测', explanation: '缺证据', evidenceRefs: [], confidence: 'low' },
+      ],
     };
     const a = auditCitations(withFake, ['C001', 'C002']);
     expect(a.unknownRefs).toEqual(['C404']);
     expect(a.claimsWithoutCitation).toBe(1);
-    // support 2 + opposition 0 + themes 1 + findings 1 = 4
-    expect(a.totalCitations).toBe(4);
+    // GOOD 8 条引用 + 新 claims 多出的 1 条 = 9
+    expect(a.totalCitations).toBe(9);
   });
 
   it('auditCitations counts every citation and every uncited claim', () => {
     const a = auditCitations(GOOD, ['C001', 'C002']);
     expect(a.unknownRefs).toEqual([]);
     expect(a.claimsWithoutCitation).toBe(0);
-    // support 1 + opposition 1 + themes 1 + findings 1 = 4
-    expect(a.totalCitations).toBe(4);
+    // narratives 1 + tensions 2 + mechanisms 1 + signalVsNoise 1
+    // + contentImplications 1 + claims 1 + hypothesesToTest 1 = 8
+    expect(a.totalCitations).toBe(8);
   });
 });
 
@@ -559,14 +595,20 @@ describe('mapToCommentAnalysis（领域投影 + V3.1 匿名引用回溯）', () 
       videoId: 'v1',
       model: 'm',
       citationMap: { C001: '101', C002: '102' },
+      auditId: 'ai_audit_1',
     });
     expect(rec.videoId).toBe('v1');
     expect(rec.model).toBe('m');
-    // 渲染文本经映射回真实 rpid（本地口径）
+    // V3.2.0 · AI-META：auditId 随产品结果落库
+    expect(rec.auditId).toBe('ai_audit_1');
+    // 核心矛盾投影到 supportResult（渲染文本经映射回真实 rpid，本地口径）
     expect(rec.supportResult[0]).toContain('101');
-    expect(rec.oppositionResult[0]).toContain('102');
+    expect(rec.supportResult[0]).toContain('102');
+    expect(rec.oppositionResult).toEqual([]);
+    // 引用回溯覆盖全部研究字段（narratives/tensions/mechanisms/signal/implications/claims/hypotheses）
     expect(rec.citedCommentRpids.sort()).toEqual(['101', '102']);
-    expect(rec.themeResult[0]).toContain('画质');
+    expect(rec.themeResult[0]).toContain('画质认可');
+    expect(rec.themeResult[0]).toContain('主叙事');
     // V3.1.0：citationMap 必须随产品结果落库
     expect(rec.citationMap).toEqual({ C001: '101', C002: '102' });
     // 情绪未由结构化输出提供 → 明确写进 uncertainty，而不是假装是 0 情绪
