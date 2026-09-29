@@ -21,9 +21,9 @@
 | **P1-F** | 隐私复核 | ✅ | Probe / Main 双通道零身份（外发语料 + `__meta`）；审计行 `targetId` 为本地归档键不属于外发通道；`PRIVACY-001..004` |
 | **T** | 测试矩阵 | ✅ | 新增 fingerprint / pause 两文件；probes 全量重写；timeout / privacy 扩展；本地全量 **421 passed / 2 skipped（40 文件）** |
 | **D** | 文档同步 | ✅ | SPEC 6.4-6.9 重写为旁路 / 暂停 / 指纹语义；README「Probe 旁路诊断」章节 + 8 档时长 + 版本历程；六处对齐 `3.1.1`；docs-consistency 升级 3.1.1 契约 |
-| **G** | 门禁链 | 🔄 | typecheck / lint / test / build / test:dist / scan-secrets / verify-acceptance → commit → push → CI → tag `v3.1.1` + Release → audit ZIP |
+| **G** | 门禁链 | ✅ | 全绿：typecheck / lint 0 错 / test **421 passed** / build / test:dist / scan-secrets 0 泄漏 / verify-acceptance TEST 001-009 → commit `c5fe486` → CI ✅（run 36540494160）→ tag `v3.1.1` + Release 398938067 → audit ZIP 459.2KB / 200 files（SHA256 `3B9F51C4…F66E9`；软目标 300–450KB 超出 9KB，文档与测试真实增长，如实报告） |
 
-本地已验证（截至文档同步完成）：typecheck EXIT=0；test **421 passed / 2 skipped**（40 文件）。
+本地已验证（截至发布完成）：typecheck EXIT=0；test **421 passed / 2 skipped**（40 文件）；CI conclusion=success。
 
 ---
 
