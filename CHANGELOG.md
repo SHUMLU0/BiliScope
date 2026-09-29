@@ -2,6 +2,61 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/) 规范。
 
+## [V3.1.0] - 2026-09-29
+
+**Research Workspace（研究工作台）**：AI 评论数据**隐私化**（AI 只见匿名引用，真实 ID 留本地）、
+AI 时长策略放宽（空闲超时默认 300s / 可选不限制）、Popup 与研究台重做、
+视频库 / 选题库 / Idea→Experiment / 导入导出 UI。
+**不重写采集层 / CommentCollector / WBI / Dexie，不删历史数据与审计。**
+
+### Added
+
+- **AI 评论数据隐私化（AI-PRIVACY-001..004）**：AI 请求（system/user prompt / facts / JSON Schema）
+  **完全不含** `rpid / uname / mid / videoId` 等身份信息；模型只看到匿名引用
+  `{ref:"C001", content, likes, replyCount, replyLevel, selectionReason, rankInSample}`。
+  `ref → rpidStr` 映射（`citationMap`）只随产品结果落本地库（`CommentAnalysis.citationMap`），
+  **绝不发送 Provider**。UI 点击 ref 经映射回溯真实评论；旧记录（无映射）如实降级显示 ref 本身。
+  Schema 字段相应重命名：`evidenceRpids→evidenceRefs`、`rpid→refs`、`rpids→refs`（DOMAIN_SHAPE_KEYS
+  反幽灵防线不变，只换键名语义）。
+- **AI 时长策略（TIMEOUT-001..003）**：流式空闲超时默认 **120s → 300s**；设置页新增「AI 时长策略」
+  （60/120/180/300 秒 / **不限制**）；`AnalyzeRequest.idleTimeoutMs`（undefined=默认 / number=指定 /
+  **null=不限制**）。**null 只是不建 idle timer，AbortController 与外部中止链路保留**——
+  真实断连 / 用户取消仍必须失败（行为测试覆盖挂起流 + 外部 signal abort）。
+  非 AI Test Mode 下非流式 fallback 总超时跟随同一选项。
+- **AI Test Mode 硬归一**：Test Mode 下 `idleTimeoutMs` 由 orchestrator 强制归一为 `null`
+  （不依赖 UI 记得传参），与 `noTotalTimeout` 同一语义层级。
+- **研究台（Dashboard）**：新首页 `dashboard.html`（Nav 首位 + Popup 入口）：7 个 KPI
+  （视频 / 评论 / 账号 / AI 分析（**排除探针行**）/ 快照 / 评论研究 / 7 日任务成功率）+
+  最近 AI 分析 / 最近评论研究两张表 + 空态引导。**只读 IndexedDB，禁联网**；unknown≠0（显示 –）。
+- **Popup 重做**：头部（品牌 + 版本号 + 研究台按钮）/ 当前页上下文卡（视频页一键直达评论研究）/
+  快速操作网格（7 入口）/ 最近任务（最近 5 条采集任务）。**零 inline style**（新增 `popup.css`）；
+  顺手修复视频按钮旧 `#video=` 无效链接 → `?bvid=`。
+- **视频库（Video Research 页）**：本地 videos 表浏览（最近 300 条）：标题 / BV / UP 过滤 +
+  4 种排序（发布时间 / 播放 / 点赞 / 评论——按**最新快照**）+ 直达评论研究。
+- **选题库 UI（Topic）**：灵感页新增选题面板（新建 / upsertByName 同名合并 / 竞争度四档 / 删除）。
+- **Idea → Experiment 闭环 UI**：灵感卡片「→ 实验」三步录入（hypothesis 预填自灵感标题）；
+  实验卡片状态流转（计划中/进行中/已完成/已中止）+ 记录结果（写结论自动标记完成）；
+  `createExperimentFromIdea()` 落 `ideaId` 关联，灵感状态自动推进 `idea → researching`。
+- **导入 / 导出 UI**：挂「我的数据」页：导出全部数据 JSON（文件名含版本号与日期）；
+  导入前逐行 Zod 预检并**如实显示合法 / 非法计数**；merge / replace（replace 需二次确认）。
+
+### Changed
+
+- **导出文件版本号修复（EXPORT-VERSION-001）**：`exportAll()` 的 `version` 字段此前**硬编码 '0.1.0'**
+  （从 V0.1 起从未更新过）。现在统一走 `__APP_VERSION__`（构建期 vite define 注入，
+  单一来源 = `package.json`）；设置页「关于」的 V0.1 硬编码同步修复。
+- **非流式默认超时 120s → 300s**（`FALLBACK_TIMEOUT_MS`），与流式空闲默认上限一致。
+- 设置页旧文案更新：「连续 120 秒无新响应」→ 300s 语义；`timeoutMs` 选项默认 300 秒。
+
+### Tests
+
+- 新增 `tests/ai/timeout.test.ts`（5 例）：`TIMEOUT-001`（默认 300s 常量）/ `TIMEOUT-002`
+  （number 生效 abort / null 长静默成功 / **null 下外部中止仍必须失败**——挂起流 mock 监听
+  request signal）/ `TIMEOUT-003`（Test Mode 显式短超时被归一 null / 非 Test Mode 对照）。
+  全部真实 timer，无 fake timers（避免 Date.now 与 timer 推进不同步的假绿）。
+- `EXPORT-VERSION-001`：导出 payload 的 version 与 package.json 一致。
+- `tests/ai/streaming.test.ts` 常量断言更新（`DEFAULT_IDLE_TIMEOUT_MS = 300_000`）。
+
 ## [V3.0.2] - 2026-09-29
 
 **AI 开放测试模式**：解除 BiliScope 自我施加的 AI 请求/输出限制 —— 保留 Provider 自身限制，

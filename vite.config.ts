@@ -3,8 +3,15 @@ import react from '@vitejs/plugin-react';
 import { crx } from '@crxjs/vite-plugin';
 import { resolve } from 'node:path';
 import manifest from './extension/manifest.json' with { type: 'json' };
+import pkg from './package.json' with { type: 'json' };
 
+// V3.1.0 · D6：版本号单一来源 = package.json。
+// UI（popup「关于」）与导出文件头（export version 修复）都读 `__APP_VERSION__`，
+// 禁止在任何源码里硬编码版本字符串。
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),
@@ -30,6 +37,8 @@ export default defineConfig({
       input: {
         popup: resolve(__dirname, 'src/ui/popup/index.html'),
         options: resolve(__dirname, 'src/ui/options/index.html'),
+        'pages/dashboard': resolve(__dirname, 'src/ui/pages/dashboard.html'),
+        'pages/video-research': resolve(__dirname, 'src/ui/pages/video-research.html'),
         'pages/creator': resolve(__dirname, 'src/ui/pages/creator.html'),
         'pages/radar': resolve(__dirname, 'src/ui/pages/radar.html'),
         'pages/comment': resolve(__dirname, 'src/ui/pages/comment.html'),

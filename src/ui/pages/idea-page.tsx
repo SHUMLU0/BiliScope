@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Nav } from '../components/Nav';
+import { ExperimentPanel, createExperimentFromIdea } from '../components/ExperimentPanel';
+import { TopicPanel } from '../components/TopicPanel';
 import { ideaRepo } from '@repositories/index';
 import { newId } from '@utils/id';
 import { nowIso } from '@utils/time';
@@ -80,6 +82,17 @@ export function IdeaPage() {
     await refresh();
   };
 
+  // V3.1.0 · P1：Idea → Experiment 闭环（hypothesis 预填，三步 prompt 快速录入）
+  const handleToExperiment = async (idea: Idea): Promise<void> => {
+    const hypothesis = prompt('假设（H）——你想验证什么？', `「${idea.title}」值得做成一期内容`);
+    if (hypothesis === null) return;
+    const targetAccount = prompt('目标账号（可选）', '') ?? '';
+    const expectedResult = prompt('预期结果（可选）', '') ?? '';
+    await createExperimentFromIdea(idea, { hypothesis, targetAccount, expectedResult });
+    setStatus(`已创建实验：${hypothesis.trim() || idea.title}`);
+    await refresh();
+  };
+
   return (
     <div className="container stack">
       <h1 style={{ margin: 0 }}>灵感 & 选题</h1>
@@ -131,13 +144,20 @@ export function IdeaPage() {
                 )}
                 <div className="row" style={{ justifyContent: 'space-between' }}>
                   <span className="faint">{i.updatedAt.slice(0, 16).replace('T', ' ')}</span>
-                  <button onClick={() => handleDelete(i.id)}>删除</button>
+                  <span className="row" style={{ gap: 8 }}>
+                    <button onClick={() => handleToExperiment(i)}>→ 实验</button>
+                    <button onClick={() => handleDelete(i.id)}>删除</button>
+                  </span>
                 </div>
               </div>
             ))}
           </div>
         )}
       </section>
+
+      {/* V3.1.0 · P1：Idea→Experiment 闭环与选题库 */}
+      <ExperimentPanel />
+      <TopicPanel />
     </div>
   );
 }

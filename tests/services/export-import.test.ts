@@ -5,8 +5,17 @@ import { db } from '@db/database';
 import { newId } from '@utils/id';
 import { nowIso } from '@utils/time';
 import { creatorSchema } from '@models/creator';
+import pkg from '../../package.json';
 
 describe('export / import', () => {
+  // V3.1.0 · D6（EXPORT-VERSION-001）：导出 payload 的 version 必须与 package.json 一致。
+  // 旧 bug：export.ts 硬编码 version: '0.1.0'，导出文件的版本号从未更新过。
+  it('EXPORT-VERSION-001: exportAll().version 跟随 package.json（单一来源）', async () => {
+    const p = await exportAll();
+    expect(p.version).toBe(pkg.version);
+    expect(p.version).not.toBe('0.1.0');
+  });
+
   it('round-trip JSON preserves creator', async () => {
     await db.creators.clear();
     const c = creatorSchema.parse({

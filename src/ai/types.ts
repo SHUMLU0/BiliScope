@@ -91,6 +91,19 @@ export interface AnalyzeRequest {
    */
   noTotalTimeout?: boolean;
   /**
+   * V3.1.0 · P0（AI 时长放宽）：流式**空闲上限**（同时作为非流式 fallback 总超时）。
+   *
+   * 优先级与语义：
+   *  - `undefined`（不传）= 默认 `DEFAULT_IDLE_TIMEOUT_MS`（300s）；
+   *  - `number`           = 指定毫秒（UI 选项 60/120/180/300s）；
+   *  - `null`             = **不限制**：不创建空闲 timer / 非流式总时长 timer，
+   *    请求只由 Provider 完成 / 明确错误 / 真实断连 / 外部中止结束。
+   *
+   * ⚠️ 红线：`null` ≠ 删除中止能力 —— AbortController 与外部 `signal`
+   * 照常工作，真实断连仍必须失败。AI Test Mode 传 null。
+   */
+  idleTimeoutMs?: number | null;
+  /**
    * V3.0 · 第三节：显式指定结构化输出能力等级。
    * 不传时按 Provider 配置与 jsonMode 推导。
    */

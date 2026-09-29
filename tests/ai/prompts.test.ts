@@ -9,6 +9,7 @@ import {
 } from '@ai/prompts';
 import type { Creator } from '@models/creator';
 import type { Video } from '@models/video';
+import type { SampleComment } from '@services/comment-prep';
 
 const creator: Creator = {
   id: 'cr1',
@@ -45,9 +46,17 @@ const video: Video = {
   source: 'bili-api',
 };
 
-/** V3.0.1 · P0-1：prompt 现在消费 prepare 层产出的受控样本 */
-const sample = [
-  { rpidStr: '1', uname: 'u', content: '内容', like: 0, replyLevel: 1 as const },
+/** V3.1.0 · P0-AI 隐私化：prompt 只消费 prepare 层产出的匿名样本（零身份字段） */
+const sample: SampleComment[] = [
+  {
+    ref: 'C001',
+    content: '内容',
+    likes: 0,
+    replyCount: 0,
+    replyLevel: 1,
+    selectionReason: '高赞样本',
+    rankInSample: 1,
+  },
 ];
 
 describe('prompts · Creator / Video', () => {
@@ -81,9 +90,9 @@ describe('prompts · Creator / Video', () => {
   });
 });
 
-describe('prompts · Comment（V3.0 单 schema）', () => {
+describe('prompts · Comment（V3.0 单 schema + V3.1 匿名引用）', () => {
   it('declares EXACTLY ONE schema — no contradictory second schema', () => {
-    const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', sample });
+    const { system } = buildCommentAnalyzePrompt({ sample });
     // 新 schema 的全部顶层字段必须出现
     for (const field of [
       'summary',
@@ -107,20 +116,20 @@ describe('prompts · Comment（V3.0 单 schema）', () => {
   });
 
   it('states the schema only once (no duplicated schema blocks)', () => {
-    const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', sample });
+    const { system } = buildCommentAnalyzePrompt({ sample });
     const occurrences = system.split('"nextResearch"').length - 1;
     expect(occurrences).toBe(1);
   });
 
-  it('requires rpid citations for support / opposition', () => {
-    const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', sample });
-    expect(system).toMatch(/rpid/);
+  it('requires anonymous ref citations (refs) for support / opposition', () => {
+    const { system } = buildCommentAnalyzePrompt({ sample });
+    expect(system).toMatch(/refs/);
     expect(system).toMatch(/support/);
     expect(system).toMatch(/opposition/);
   });
 
   it('forbids the exact phrasing the user listed', () => {
-    const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', sample });
+    const { system } = buildCommentAnalyzePrompt({ sample });
     // 第九节明列的禁用语必须逐条出现在 prompt 中
     expect(system).toMatch(/大多数用户都/);
     expect(system).toMatch(/用户普遍/);
@@ -131,35 +140,33 @@ describe('prompts · Comment（V3.0 单 schema）', () => {
   });
 
   it('requires uncertainty to state sample size / cleaning / bias / completeness', () => {
-    const { system } = buildCommentAnalyzePrompt({ videoId: 'v1', sample });
+    const { system } = buildCommentAnalyzePrompt({ sample });
     expect(system).toMatch(/样本量/);
     expect(system).toMatch(/抽样偏差/);
     expect(system).toMatch(/数据完整性/);
   });
 
-  it('includes facts block separately and requires rpid citations', () => {
+  it('includes facts block separately and requires anonymous ref citations', () => {
     const { system, user } = buildCommentAnalyzePrompt({
-      videoId: 'v1',
       sample,
       factsJson: JSON.stringify({ totalCollected: 1, stats: { total: 1 }, keywords: [], topComments: [], droppedNoisy: 0 }),
     });
-    expect(system).toMatch(/rpid/);
+    expect(system).toMatch(/refs/);
     // 「facts 段不得编造数字」必须以某种形式出现
     expect(system).toMatch(/禁止编造数字|不得编造数字/);
-    const parsed = JSON.parse(user) as { facts: unknown; sample: Array<{ rpid: string }> };
+    const parsed = JSON.parse(user) as { facts: unknown; sample: Array<{ ref: string }> };
     expect(parsed.facts).toBeTruthy();
-    expect(parsed.sample[0]!.rpid).toBe('1');
+    expect(parsed.sample[0]!.ref).toBe('C001');
   });
 
   it('works without factsJson (backward compatible)', () => {
-    const { user } = buildCommentAnalyzePrompt({ videoId: 'v', sample: [] });
+    const { user } = buildCommentAnalyzePrompt({ sample: [] });
     const parsed = JSON.parse(user) as { facts?: unknown };
     expect(parsed.facts).toBeUndefined();
   });
 
   it('does not crash on malformed factsJson', () => {
     const { user } = buildCommentAnalyzePrompt({
-      videoId: 'v',
       sample,
       factsJson: '{broken',
     });

@@ -346,6 +346,10 @@ export const topicRepo = {
     await db.topics.add(candidate);
     return candidate.id;
   },
+  /** V3.1.0：选题管理 UI 需要删除能力 */
+  async remove(id: string): Promise<void> {
+    await db.topics.delete(id);
+  },
 };
 
 export const experimentRepo = {

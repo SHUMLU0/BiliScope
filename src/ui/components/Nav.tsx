@@ -11,6 +11,9 @@ export interface NavItem {
 }
 
 export const NAV_ITEMS: NavItem[] = [
+  // V3.1.0 · P0：研究台（Dashboard）为默认首页，排第一位
+  { href: 'dashboard.html', label: '研究台' },
+  { href: 'video-research.html', label: '视频库' },
   { href: 'creator.html', label: '账号研究' },
   { href: 'radar.html', label: '全站雷达' },
   { href: 'comment.html', label: '评论研究' },

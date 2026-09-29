@@ -1,7 +1,13 @@
 import { defineConfig, configDefaults } from 'vitest/config';
 import { resolve } from 'node:path';
+import pkg from './package.json' with { type: 'json' };
 
 export default defineConfig({
+  // V3.1.0 · D6：与 vite.config.ts 保持一致 —— 测试环境同样注入 __APP_VERSION__，
+  // 让「版本号单一来源」在源码与测试里都成立。
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),

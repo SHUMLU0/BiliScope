@@ -1,0 +1,100 @@
+/**
+ * BiliScope Popup 专属样式（V3.1.0 重做）。
+ * 只用 global.css 的 CSS 变量；禁止 inline style。
+ */
+
+.popup-root {
+  width: 360px;
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* ── 头部：品牌 + 版本 + Dashboard 入口 ── */
+.popup-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.popup-header .brand {
+  font-weight: 600;
+  font-size: 15px;
+}
+.popup-header .spacer {
+  flex: 1;
+}
+
+/* ── 上下文卡 ── */
+.popup-context .ctx-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+}
+.popup-context .ctx-id {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+  text-align: right;
+}
+
+/* ── 通用小节（标题 + 内容的紧凑纵向排布） ── */
+.popup-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ── 快速操作网格 ── */
+.popup-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+}
+.popup-actions button {
+  width: 100%;
+}
+
+/* ── 最近任务 ── */
+.popup-recent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.popup-recent .recent-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+}
+.popup-recent .recent-item:hover {
+  border-color: var(--border);
+  background: var(--bg-elev);
+}
+.popup-recent .recent-type {
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+.popup-recent .recent-target {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.popup-recent .recent-time {
+  color: var(--fg-faint);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 底部 ── */
+.popup-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}

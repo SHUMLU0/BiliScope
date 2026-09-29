@@ -4,9 +4,14 @@
  * 设计要点（对应任务书「超时策略」）：
  *  1. **首个响应等待 30s**：只提示「模型尚未返回首个响应」，**不终止请求**。
  *  2. 一旦收到 **任意有效 chunk** → 进入 streaming 模式，只监控「距上次新数据」的时间。
- *  3. **连续 120s 无任何新 chunk** → AbortController 终止 → 分类 `REQUEST_TIMEOUT`。
+ *  3. **连续空闲超过上限** → AbortController 终止 → 分类 `REQUEST_TIMEOUT`。
  *  4. **没有 30s / 60s 总时长硬切断**：总时长不构成失败条件。
- *  5. 非流式 fallback 的默认超时也放宽到 120s（V3.0.0 的 30s / V3.0.1 的 60s 对长输出偏短）。
+ *  5. 非流式 fallback 的默认超时与流式空闲上限保持一致。
+ *
+ * V3.1.0 · P0（AI 时长放宽）：
+ *  - 默认空闲上限 120s → **300s**；请求级 `AnalyzeRequest.idleTimeoutMs` 可覆盖
+ *    （60/120/180/300s），`null` = **不限制**（不创建 idle timer，AbortController 保留）。
+ *  - Test Mode / UI 选项「不限制」走 null。
  *
  * ⚠️ 任务书第 5/6 条：「不要再发第二个探测 AI 请求」「不要因为探测失败而杀掉真实请求」
  *    —— 因此本模块**不做**任何 probe 逻辑，只监控真实请求自身的活性。
@@ -15,17 +20,21 @@
 /** 流式：首个有效 chunk 的等待上限（仅提示，不终止） */
 export const STREAM_FIRST_BYTE_TIMEOUT_MS = 30_000;
 
-/** 流式：连续无新 chunk 的空闲上限（超过则终止 → REQUEST_TIMEOUT） */
-export const STREAM_IDLE_TIMEOUT_MS = 120_000;
+/**
+ * 流式：连续无新 chunk 的空闲上限（超过则终止 → REQUEST_TIMEOUT）。
+ * V3.1.0 起为**默认值**：请求级 `AnalyzeRequest.idleTimeoutMs` 优先；
+ * `null` = 不限制（不创建空闲 timer，但保留 AbortController 与外部中止链路）。
+ */
+export const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
 
 /**
  * 非流式 fallback 的默认超时。
  *
- * V3.0.0 = 30s，V3.0.1 = 60s，这里统一上调到 120s：
- * 与流式空闲上限保持一致，避免「支持流式就没事、不支持流式就超时」的不公平差异。
- * 仍然可被 `ProviderConfig.timeoutMs` / `AnalyzeRequest` 覆盖。
+ * V3.0.0 = 30s，V3.0.1 = 60s，V3.0.1 = 120s，V3.1.0 = **300s**（与默认空闲上限一致，
+ * 消除「支持流式就没事、不支持流式就超时」的不公平差异）。
+ * 仍可被 `ProviderConfig.timeoutMs` / `AnalyzeRequest.idleTimeoutMs` 覆盖。
  */
-export const FALLBACK_TIMEOUT_MS = 120_000;
+export const FALLBACK_TIMEOUT_MS = 300_000;
 
 /**
  * 从 SSE 响应体中逐行解析出 `data:` 负载。

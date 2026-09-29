@@ -11,7 +11,7 @@
  */
 
 import type { Comment } from '@models/comment';
-import { computeCommentStats, countKeywords, topComments, type CommentStats } from './analytics';
+import { computeCommentStats, countKeywords, type CommentStats } from './analytics';
 
 /**
  * V3.0.1 · P0-1：AI 样本抽样策略。
@@ -48,8 +48,36 @@ export interface CleanComment {
   uname: string;
   content: string;
   like: number;
+  replyCount: number;
   replyLevel: number;
   ctime: number;
+}
+
+/**
+ * V3.1.0 · P0-AI 隐私化：喂给 AI 的**匿名**样本条目。
+ *
+ * 铁律：本类型**禁止**出现 videoId / rpid / mid / midStr / uname / uid ——
+ * AI 只见 `ref`（C001 起始的匿名引用），真实 rpid 只留在本地 `citationMap`。
+ * 「真实 ID 留在本地，所有引用可回溯，所有 AI 结果可审计。」
+ */
+export interface SampleComment {
+  /** 匿名引用（C001 起始，3 位补零） */
+  ref: string;
+  content: string;
+  likes: number;
+  replyCount: number;
+  replyLevel: number;
+  /** 为什么这条被选入样本（来自抽样策略标签） */
+  selectionReason: string;
+  /** 在样本中的序号（1 起） */
+  rankInSample: number;
+}
+
+/** V3.1.0 · P0-AI 隐私化：事实块里的高赞评论（匿名 ref 投影） */
+export interface TopCommentRef {
+  ref: string;
+  likes: number;
+  excerpt: string;
 }
 
 export interface CommentAnalysisInput {
@@ -57,10 +85,10 @@ export interface CommentAnalysisInput {
   stats: CommentStats;
   /** 高频关键词（客观计数） */
   keywords: { keyword: string; count: number }[];
-  /** 高赞评论（客观排序） */
-  topComments: CleanComment[];
-  /** 送给 AI 的抽样正文（去重、清洗后） */
-  sample: CleanComment[];
+  /** 高赞评论（客观排序；V3.1.0 起为匿名 ref 投影，且**只从 sample 内**选取） */
+  topComments: TopCommentRef[];
+  /** 送给 AI 的抽样正文（去重、清洗、截断、**匿名化**后） */
+  sample: SampleComment[];
   /** 参与分析的评论总数（= 统计基数，采样前） */
   total: number;
   /** 被清洗掉的条数（过短 / 重复 / 正文为空） */
@@ -69,6 +97,11 @@ export interface CommentAnalysisInput {
   sampleStrategy: CommentSampleStrategy;
   /** V3.0.1 · P0-1：AI 输入预算估算（字符级，非精确 tokenizer） */
   budget: CommentInputBudget;
+  /**
+   * V3.1.0 · P0-AI 隐私化：ref → 真实 rpidStr 的**本地**映射。
+   * ⚠️ 绝不发送 Provider；随 CommentAnalysis 落库供 UI 回溯定位。
+   */
+  citationMap: Record<string, string>;
   /** 说明文本（供 UI 展示，强调「事实在前、推断在后」） */
   note: string;
 }
@@ -108,6 +141,7 @@ function cleanOne(c: Comment, minLen: number): CleanComment | null {
     uname: c.uname,
     content,
     like: c.like,
+    replyCount: c.replyCount,
     replyLevel: c.replyLevel,
     ctime: c.ctime,
   };
@@ -197,7 +231,7 @@ export function prepareCommentAnalysis(
   const droppedCount = comments.length - deduped.length;
 
   // 事实层：用原始 comments 计算统计（保留完整样本，不受清洗影响）
-  // 但关键词 / 高赞用清洗后的集合，避免刷屏噪声。
+  // 但关键词用清洗后的集合，避免刷屏噪声。
   const stats = computeCommentStats(comments);
   const factsForKeywords: Comment[] = deduped.map((c) => ({
     id: c.rpidStr,
@@ -224,31 +258,43 @@ export function prepareCommentAnalysis(
     source: 'wbi-main',
   }));
   const keywords = countKeywords(factsForKeywords, { topN: 30 });
-  const top = topComments(factsForKeywords, 15).map((c) => ({
-    rpidStr: c.rpidStr,
-    uname: c.uname,
-    content: c.content,
-    like: c.like,
-    replyLevel: c.replyLevel,
-    ctime: c.ctime,
-  }));
 
-  // 抽样：优先高赞 + 最新，保证 AI 看到代表性样本
-  // V3.0.1 · P0-1：抽样统一走 buildSample（唯一采样入口，prompt 层不得再 slice）
-  const sample = buildSample(deduped, sampleLimit, sampleStrategy).map((c) => ({
-    ...c,
-    content: c.content.slice(0, contentLimit),
-  }));
+  // 抽样：唯一采样入口（V3.0.1 · P0-1），prompt 层不得再 slice
+  const picked = buildSample(deduped, sampleLimit, sampleStrategy);
+
+  // ── V3.1.0 · P0-AI 隐私化：匿名 ref 分配（C001 起始）+ 本地 citationMap ──
+  // ref → 真实 rpid 的映射**只留在本地**，绝不进入 prompt / facts / 审计 prompt 字段。
+  const citationMap: Record<string, string> = {};
+  const sample: SampleComment[] = picked.map((c, i) => {
+    const ref = `C${String(i + 1).padStart(3, '0')}`;
+    citationMap[ref] = c.rpidStr;
+    return {
+      ref,
+      content: c.content.slice(0, contentLimit),
+      likes: c.like,
+      replyCount: c.replyCount,
+      replyLevel: c.replyLevel,
+      selectionReason: SAMPLE_STRATEGY_LABEL[sampleStrategy],
+      rankInSample: i + 1,
+    };
+  });
+
+  // 高赞事实：**只从 sample 内**选取 —— 保证每个 topComment 都有合法 ref 可回溯
+  //（AI 只能引用它真正看到的 ref；样本外高赞的 rpid 不给 AI，也不伪装成可引用项）。
+  const topComments: TopCommentRef[] = [...sample]
+    .sort((a, b) => b.likes - a.likes)
+    .slice(0, 15)
+    .map((s) => ({ ref: s.ref, likes: s.likes, excerpt: s.content.slice(0, 120) }));
 
   const factsJson = serializeCommentFacts({
     stats,
     keywords,
-    topComments: top,
+    topComments,
     total: comments.length,
     droppedCount,
   });
 
-  const sampleChars = sample.reduce((n, c) => n + c.content.length + c.uname.length + 16, 0);
+  const sampleChars = sample.reduce((n, c) => n + c.content.length + c.ref.length + 24, 0);
   const budget: CommentInputBudget = {
     // 统计基数（全部采集）与 AI 样本严格分区
     total: comments.length,
@@ -262,13 +308,14 @@ export function prepareCommentAnalysis(
   return {
     stats,
     keywords,
-    topComments: top,
+    topComments,
     sample,
     total: comments.length,
     droppedCount,
     sampleStrategy,
     budget,
-    note: '统计数字为客观计算（不含 AI 推断）；AI 仅基于受控抽样原文产出解释性结论。',
+    citationMap,
+    note: '统计数字为客观计算（不含 AI 推断）；AI 仅基于受控抽样原文产出解释性结论。样本以匿名引用（C001…）提供给模型，真实评论 ID 只保留在本地。',
   };
 }
 
@@ -298,7 +345,8 @@ export function serializeCommentFacts(input: CommentFactsInput): string {
         uniqueUsers: input.stats.uniqueUsers,
       },
       keywords: input.keywords.slice(0, 20),
-      topComments: input.topComments.map((c) => ({ rpid: c.rpidStr, like: c.like, excerpt: c.content.slice(0, 120) })),
+      // V3.1.0 · P0-AI 隐私化：高赞事实只带匿名 ref（{ref, likes, excerpt}），绝不出现 rpid / uname
+      topComments: input.topComments.map((c) => ({ ref: c.ref, likes: c.likes, excerpt: c.excerpt })),
       droppedNoisy: input.droppedCount,
     },
     null,

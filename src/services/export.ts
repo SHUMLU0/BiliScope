@@ -28,7 +28,9 @@ export async function exportAll(): Promise<ExportPayload> {
     ]);
   return {
     exportedAt: new Date().toISOString(),
-    version: '0.1.0',
+    // V3.1.0 · D6（EXPORT-VERSION-001）：版本号单一来源 = package.json（vite define 注入）。
+    // 旧 bug：硬编码 '0.1.0' —— 导出文件的 version 字段从 V0.1 起就没有再更新过。
+    version: __APP_VERSION__,
     data: {
       creators,
       creatorSnapshots,

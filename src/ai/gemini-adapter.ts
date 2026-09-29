@@ -21,7 +21,7 @@ import { logger } from '@utils/logger';
 import { linkExternalSignal } from './probe';
 import { DEFAULT_TIMEOUT_MS } from './openai-adapter';
 import {
-  STREAM_IDLE_TIMEOUT_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
   consumeSseStream,
   parseSseDataLines,
 } from './streaming';
@@ -197,6 +197,11 @@ export class GeminiAdapter implements AIProvider {
     let receivedChars = 0;
     let timedOut = false;
 
+    // V3.1.0 · P0：空闲上限请求级参数化（undefined=默认 300s / number=指定 / null=不限制）。
+    // null ≠ 删除中止能力：AbortController 与外部 signal 照常工作。
+    const idleLimitMs: number | null =
+      req.idleTimeoutMs === null ? null : (req.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS);
+
     const watchdog = setInterval(() => {
       const now = performance.now();
       const idleSince = lastChunkAt === 0 ? startedAt : lastChunkAt;
@@ -209,7 +214,7 @@ export class GeminiAdapter implements AIProvider {
         receivedChars,
         chunkCount,
       });
-      if (idleMs >= STREAM_IDLE_TIMEOUT_MS) {
+      if (idleLimitMs !== null && idleMs >= idleLimitMs) {
         timedOut = true;
         ctrl.abort();
       }
@@ -227,7 +232,7 @@ export class GeminiAdapter implements AIProvider {
       // V3.0.2：只有空闲看门狗触发的中止才改写为 idle-timeout；外部中止原样上抛
       if (timedOut) {
         throw new Error(
-          `stream idle timeout: 连续 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} 秒没有收到任何新响应`,
+          `stream idle timeout: 连续 ${Math.round((idleLimitMs ?? 0) / 1000)} 秒没有收到任何新响应`,
         );
       }
       throw e;
@@ -308,7 +313,7 @@ export class GeminiAdapter implements AIProvider {
     }
 
     if (timedOut) {
-      throw new Error(`stream idle timeout: 连续 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} 秒没有收到任何新响应`);
+      throw new Error(`stream idle timeout: 连续 ${Math.round((idleLimitMs ?? 0) / 1000)} 秒没有收到任何新响应`);
     }
 
     const aggregated: GeminiResp = {
@@ -333,10 +338,15 @@ export class GeminiAdapter implements AIProvider {
     const sendNonStreaming = async (m: StructuredOutputMode): Promise<GeminiResp> => {
       const ctrl = new AbortController();
       // V3.0.2：外部中止优先；noTotalTimeout（probe healthy / Test Mode）时不设人为总时长 timer
+      // V3.1.0：idleTimeoutMs === null（用户选择「不限制」）同样不设总时长 timer；
+      //         但 AbortController 与外部 signal 链接保留——真实断连/用户取消仍必须失败。
       const unlink = linkExternalSignal(req.signal, ctrl);
-      const timer = req.noTotalTimeout
-        ? null
-        : setTimeout(() => ctrl.abort(), this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      const noTotal = req.noTotalTimeout === true || req.idleTimeoutMs === null;
+      const timeoutMs =
+        typeof req.idleTimeoutMs === 'number'
+          ? req.idleTimeoutMs
+          : (this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      const timer = noTotal ? null : setTimeout(() => ctrl.abort(), timeoutMs);
       try {
         const res = await fetch(this.url(false), {
           method: 'POST',

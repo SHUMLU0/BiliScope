@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { loadProvidersAsync, saveProviders, setActiveProvider } from '@ai/settings';
+import { loadProvidersAsync, saveProviders, setActiveProvider, loadIdleTimeoutAsync, saveIdleTimeout } from '@ai/settings';
 import { aiTestConnection } from '@ai/service';
 import type { ProviderConfig, ProviderName } from '@ai/types';
 import { clearAll } from '@db/database';
@@ -19,11 +19,17 @@ export function OptionsApp() {
   const [active, setActive] = useState<ProviderName>('openai-compatible');
   const [test, setTest] = useState<{ ok: boolean; latencyMs: number; message?: string } | null>(null);
   const [saving, setSaving] = useState(false);
+  // V3.1.0 · P0-AI 时长放宽：全局「流式空闲超时」偏好（undefined=默认 300s / null=不限制）
+  const [idlePref, setIdlePref] = useState<number | null>(300_000);
+  const [idleSavedAt, setIdleSavedAt] = useState(0);
 
   useEffect(() => {
     loadProvidersAsync().then((s) => {
       setStore(s);
       setActive(s.activeProvider);
+    });
+    loadIdleTimeoutAsync().then((v) => {
+      if (v === null || typeof v === 'number') setIdlePref(v);
     });
   }, []);
 
@@ -61,6 +67,14 @@ export function OptionsApp() {
     if (!confirm('确认清空全部本地数据？此操作不可恢复。')) return;
     await clearAll();
     alert('已清空');
+  };
+
+  // V3.1.0 · P0-AI 时长放宽：空闲超时即时保存（无需点「保存」按钮）
+  const handleIdlePrefChange = async (v: string) => {
+    const next = v === 'unlimited' ? null : Number(v);
+    setIdlePref(next);
+    await saveIdleTimeout(next);
+    setIdleSavedAt(Date.now());
   };
 
   return (
@@ -132,23 +146,23 @@ export function OptionsApp() {
             onChange={(e) => updateCfg({ supportsStreaming: e.target.checked })}
           />
           <span className="muted">
-            该 Provider 支持流式输出（SSE）— 推荐开启（长分析不再按总时长切断；连续 120 秒无新响应才超时）
+            该 Provider 支持流式输出（SSE）— 推荐开启（长分析不再按总时长切断；空闲上限见下方「AI 时长策略」，默认连续 300 秒无新响应才超时）
           </span>
         </label>
-        {/* V3.0.1 · P0-A：请求超时（仅对非流式链路生效；默认 120s）。
+        {/* V3.0.1 · P0-A：请求超时（仅对非流式链路兜底；V3.1.0 起默认 300s，
+            且请求级「流式空闲超时」选项优先于本值）。
             超时会明确报 REQUEST_TIMEOUT，而非笼统的 REQUEST_FAILED */}
         <label className="stack" style={{ gap: 4 }}>
           <span className="muted">
-            非流式请求超时 timeoutMs（默认 120 秒；流式链路按「连续 120 秒无新响应」判定）
+            非流式请求超时 timeoutMs（默认 300 秒；分析时若设置了「AI 时长策略」，以该策略为准）
           </span>
           <select
-            value={String(cfg.timeoutMs ?? 120_000)}
+            value={String(cfg.timeoutMs ?? 300_000)}
             onChange={(e) => updateCfg({ timeoutMs: Number(e.target.value) })}
           >
-            <option value="30000">30 秒</option>
             <option value="60000">60 秒</option>
-            <option value="90000">90 秒</option>
-            <option value="120000">120 秒（默认）</option>
+            <option value="120000">120 秒</option>
+            <option value="300000">300 秒（默认）</option>
           </select>
         </label>
         <div className="row">
@@ -162,6 +176,29 @@ export function OptionsApp() {
             {test.ok ? `OK · ${test.latencyMs}ms` : `FAIL · ${test.message ?? ''}`}
           </div>
         )}
+      </section>
+
+      {/* V3.1.0 · P0-AI 时长放宽：全局空闲超时（不属于任何单个 Provider） */}
+      <section className="card stack">
+        <h3 style={{ margin: 0 }}>AI 时长策略</h3>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="muted">流式空闲超时（连续无新响应才计时；默认 300 秒）</span>
+          <select
+            value={idlePref === null ? 'unlimited' : String(idlePref)}
+            onChange={(e) => handleIdlePrefChange(e.target.value)}
+          >
+            <option value="60000">60 秒</option>
+            <option value="120000">120 秒</option>
+            <option value="180000">180 秒</option>
+            <option value="300000">300 秒（默认）</option>
+            <option value="unlimited">不限制（仅真实断连 / 手动取消才终止）</option>
+          </select>
+        </label>
+        <p className="faint" style={{ margin: 0 }}>
+          只对「连续静默」计时——只要模型还在输出就永不中断。非流式请求的总超时跟随同一选项。
+          分析页开启 AI Test Mode 时始终为「不限制」。
+        </p>
+        {idleSavedAt > 0 && <div className="tag ok">已保存</div>}
       </section>
 
       <section className="card stack">
@@ -179,7 +216,7 @@ export function OptionsApp() {
       <section className="card stack">
         <h3 style={{ margin: 0 }}>关于</h3>
         <p className="faint" style={{ margin: 0 }}>
-          V0.1 · MIT License · 数据来源仅 B 站公开接口。
+          v{__APP_VERSION__} · MIT License · 数据来源仅 B 站公开接口。
         </p>
       </section>
     </div>

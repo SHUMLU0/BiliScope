@@ -96,8 +96,18 @@ export const commentAnalysisSchema = z.object({
   questionResult: z.array(z.string()).default([]),
   supportResult: z.array(z.string()).default([]),
   oppositionResult: z.array(z.string()).default([]),
-  // 支持 / 质疑必须附带原始评论引用 ID（禁止凭空断言）
+  // 支持 / 质疑必须附带原始评论引用（禁止凭空断言；存真实 rpidStr，仅本地）
   citedCommentRpids: z.array(z.string()).default([]),
+  /**
+   * V3.1.0 · P0-AI 隐私化：匿名引用映射（ref → 真实 rpidStr）。
+   *
+   * 「真实 ID 留在本地，所有引用可回溯，所有 AI 结果可审计。」
+   * - AI 请求里只见 C001 类 ref（sample / facts / schema 全匿名）；
+   * - 本映射随产品结果落库，UI 用它把 AI 结果中的 ref 回溯到真实评论；
+   * - 绝不发送 Provider，也绝不进入 prompt / 审计 prompt 字段；
+   * - 旧记录无此字段 → default({})，回溯不可用时 UI 如实降级（显示 ref 本身）。
+   */
+  citationMap: z.record(z.string()).default({}),
   uncertaintyNote: z.string().max(5000).default(''),
   /**
    * Provider 原始响应（`AnalyzeResponse.raw`），**仅供审计/排错**。

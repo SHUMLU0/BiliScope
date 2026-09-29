@@ -4,6 +4,7 @@ import { CommentCollector } from '@collectors/comment-collector';
 import { commentRepo, videoRepo, aiAnalysisRepo, commentAnalysisRepo } from '@repositories/index';
 import { buildCommentAnalyzePrompt } from '@ai/prompts';
 import { orchestrateCommentAnalysis } from '@ai/orchestrator';
+import { loadIdleTimeoutAsync } from '@ai/settings';
 import { describeFailure, type AIFailureInfo } from '@ai/failures';
 import type { CommentAIResult } from '@ai/schemas';
 import type { StreamProgress } from '@ai/types';
@@ -72,7 +73,8 @@ export function CommentPage() {
     durationMs: number;
     requestCount: number;
     repaired: boolean;
-    unknownRpids: string[];
+    /** V3.1.0：匿名 ref 白名单审计（未知引用） */
+    unknownRefs: string[];
     claimsWithoutCitation: number;
     notice?: string;
   } | null>(null);
@@ -124,7 +126,7 @@ export function CommentPage() {
       durationMs: 0,
       requestCount: 0,
       repaired: false,
-      unknownRpids: [],
+      unknownRefs: [],
       claimsWithoutCitation: 0,
     });
   }, []);
@@ -226,7 +228,6 @@ export function CommentPage() {
       setAiStage('构造分析上下文…');
       const factsJson = serializeCommentFacts(prep);
       const { system, user } = buildCommentAnalyzePrompt({
-        videoId: video.id,
         sample: prep.sample,
         totalComments: prep.total,
         factsJson,
@@ -242,9 +243,10 @@ export function CommentPage() {
         systemPrompt: system,
         userPrompt: user,
         factsJson,
-        // 真实存在的 rpid 白名单 —— 用于校验模型引用是否落空。
-        // 注意：白名单用「样本内」的 rpid，模型只被允许引用它真正看到的评论。
-        knownRpids: prep.sample.map((c) => c.rpidStr),
+        // V3.1.0 · P0-AI 隐私化：模型只见匿名 ref（C001…）—— 白名单与映射都来自 prepare 层。
+        // ref → 真实 rpid 的映射只落本地 CommentAnalysis.citationMap，绝不发给 Provider。
+        knownRefs: prep.sample.map((c) => c.ref),
+        citationMap: prep.citationMap,
         // V3.0.1 · P0-A：流式进度透传到 UI。
         // 只更新展示，不参与任何业务判定；收到首个有效 chunk 后才切到「已开始输出」。
         onProgress: (info) => {
@@ -269,6 +271,9 @@ export function CommentPage() {
               : aiOutputLimit,
         // V3.0.2：AI Test Mode（关闭 BiliScope 人为 token/总时长限制）
         testMode: aiTestMode,
+        // V3.1.0 · P0-AI 时长放宽：全局空闲超时偏好（undefined=默认 300s / number=指定 /
+        // null=不限制；Test Mode 下 orchestrator 会强制归一为 null，这里无需重复处理）
+        idleTimeoutMs: await loadIdleTimeoutAsync(),
         // V3.0.2：用户取消信号（同时终止 Probe 与 Main）
         signal: ctrl.signal,
       });
@@ -284,7 +289,7 @@ export function CommentPage() {
           durationMs: r.durationMs,
           requestCount: r.requestCount,
           repaired: false,
-          unknownRpids: [],
+          unknownRefs: [],
           claimsWithoutCitation: 0,
         });
         // 关键：不 setReport(null)、不删库 —— 最近一次成功分析必须保留
@@ -307,6 +312,8 @@ export function CommentPage() {
           oppositionResult: r.data.opposition.map((c) => c.statement),
           citedCommentRpids: r.citations.totalCitations ? [] : [],
           uncertaintyNote: r.data.uncertainty.join('\n'),
+          // V3.1.0 · P0-AI 隐私化：内存里的产品结果也带映射（DB 记录由 orchestrate 落库）
+          citationMap: prep.citationMap,
         },
         // V3.0.1 · P0-2：产品结果持有结构化业务结果（不是 Provider 原始响应）
         analysisResult: r.data,
@@ -316,7 +323,7 @@ export function CommentPage() {
         durationMs: r.durationMs,
         requestCount: r.requestCount,
         repaired: r.repaired,
-        unknownRpids: r.citations.unknownRpids,
+        unknownRefs: r.citations.unknownRefs,
         claimsWithoutCitation: r.citations.claimsWithoutCitation,
       });
       setStatusLevel('info');
@@ -350,18 +357,26 @@ export function CommentPage() {
     setShowHistory(true);
   };
 
-  /** 点击 rpid → 定位到本地评论并高亮 */
-  const locateRpid = useCallback((rpid: string): void => {
-    setHighlightRpid(rpid);
-    const el = commentRefs.current.get(rpid);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    // 若被过滤掉则清空过滤条件，保证「点得动」
-    setFilter('');
-    setTimeout(() => {
-      const el2 = commentRefs.current.get(rpid);
-      if (el2) el2.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }, 60);
-  }, []);
+  /**
+   * V3.1.0 · P0-AI 隐私化：点击匿名 ref → 经 citationMap 回溯真实 rpid 并定位。
+   * 新记录走映射；旧记录（分析结果里直接存 rpid 的历史语义）原值直传，行为兼容。
+   */
+  const locateRef = useCallback(
+    (ref: string): void => {
+      const map = report?.record.citationMap ?? {};
+      const rpid = map[ref] ?? ref;
+      setHighlightRpid(rpid);
+      const el = commentRefs.current.get(rpid);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // 若被过滤掉则清空过滤条件，保证「点得动」
+      setFilter('');
+      setTimeout(() => {
+        const el2 = commentRefs.current.get(rpid);
+        if (el2) el2.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 60);
+    },
+    [report],
+  );
 
   // P0-E：统计事实（客观）
   const stats = useMemo(() => computeCommentStats(comments), [comments]);
@@ -388,15 +403,20 @@ export function CommentPage() {
     return sorted;
   }, [comments, filter, sortKey]);
 
-  /** 只有被 AI 引用到的评论置顶提示，方便对照 */
+  /** 只有被 AI 引用到的评论置顶提示，方便对照。
+   *  V3.1.0：AI 结果里是匿名 ref —— 先经本地 citationMap 回溯成真实 rpidStr 再比对。 */
   const citedSet = useMemo(() => {
     const r = report?.analysisResult;
     if (!r) return new Set<string>();
+    const map = report?.record.citationMap ?? {};
     const s = new Set<string>();
-    for (const c of r.support) c.rpid.forEach((x) => s.add(x));
-    for (const c of r.opposition) c.rpid.forEach((x) => s.add(x));
-    for (const t of r.themes) t.rpids.forEach((x) => s.add(x));
-    for (const f of r.findings) f.evidenceRpids.forEach((x) => s.add(x));
+    const add = (refs: string[]): void => {
+      for (const x of refs) s.add(map[x] ?? x);
+    };
+    for (const c of r.support) add(c.refs);
+    for (const c of r.opposition) add(c.refs);
+    for (const t of r.themes) add(t.refs);
+    for (const f of r.findings) add(f.evidenceRefs);
     return s;
   }, [report]);
 
@@ -614,13 +634,13 @@ export function CommentPage() {
       {report?.analysisResult && (
         <CommentAIReport
           result={report.analysisResult}
-          unknownRpids={aiMeta?.unknownRpids ?? []}
+          unknownRefs={aiMeta?.unknownRefs ?? []}
           claimsWithoutCitation={aiMeta?.claimsWithoutCitation ?? 0}
           repaired={aiMeta?.repaired ?? false}
           requestCount={aiMeta?.requestCount ?? 0}
           durationMs={aiMeta?.durationMs ?? 0}
           model={aiMeta?.model ?? report.record.model}
-          onLocateRpid={locateRpid}
+          onLocateRef={locateRef}
         />
       )}
 
@@ -765,7 +785,7 @@ export function CommentPage() {
             </select>
           </label>
         </div>
-        <div className="faint">被 AI 引用过的评论左侧有标记，点击分析报告里的 rpid 可直接跳转。</div>
+        <div className="faint">被 AI 引用过的评论左侧有标记，点击分析报告里的引用（C001 样式）可直接跳转定位。</div>
         {visible.length === 0 ? (
           <div className="empty">无评论</div>
         ) : (

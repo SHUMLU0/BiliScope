@@ -23,17 +23,17 @@ export const FINDING_LABEL: Record<Finding['type'], string> = {
   behavior: '行为',
 };
 
-/** 引用徽章：点击时把对应评论滚入视野并高亮 */
-export function RpidChip({ rpid, onLocate }: { rpid: string; onLocate?: (rpid: string) => void }): ReactNode {
+/** 引用徽章（匿名 ref，如 C001）：点击时把对应评论滚入视野并高亮（定位由页面层经 citationMap 回溯） */
+export function RefChip({ refId, onLocate }: { refId: string; onLocate?: (ref: string) => void }): ReactNode {
   return (
     <button
       type="button"
       className="tag mono"
-      title={`定位到评论 rpid=${rpid}`}
-      onClick={() => onLocate?.(rpid)}
+      title={`定位到评论 引用=${refId}`}
+      onClick={() => onLocate?.(refId)}
       style={{ cursor: onLocate ? 'pointer' : 'default', padding: '0 6px', fontSize: 11 }}
     >
-      {rpid}
+      {refId}
     </button>
   );
 }
@@ -84,8 +84,8 @@ function Bullets({ items, empty }: { items: string[]; empty: string }): ReactNod
 
 export interface CommentAIReportProps {
   result: CommentAIResult;
-  /** 断言的引用数与真实引用数的差异（可验证性提示） */
-  unknownRpids: string[];
+  /** 断言的引用数与真实引用数的差异（可验证性提示；存匿名 ref） */
+  unknownRefs: string[];
   claimsWithoutCitation: number;
   repaired: boolean;
   requestCount: number;
@@ -93,11 +93,12 @@ export interface CommentAIReportProps {
   model: string;
   /** 是否发生过截断/修复等需要提示的情况 */
   notice?: string;
-  onLocateRpid?: (rpid: string) => void;
+  /** 点击匿名 ref → 页面层经 citationMap 回溯真实 rpid 并定位 */
+  onLocateRef?: (ref: string) => void;
 }
 
 export function CommentAIReport(props: CommentAIReportProps): ReactNode {
-  const { result, unknownRpids, claimsWithoutCitation, repaired, requestCount, durationMs, model, notice } = props;
+  const { result, unknownRefs, claimsWithoutCitation, repaired, requestCount, durationMs, model, notice } = props;
   const [showRaw, setShowRaw] = useState(false);
 
   // 「争议 / 情绪」从 findings 里筛出来（它们本就是结构化字段，不必再让模型重复输出一遍）
@@ -121,8 +122,8 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
           <div key={i} className="stack" style={{ gap: 4 }}>
             <div>{c.statement}</div>
             <div className="row wrap" style={{ gap: 4 }}>
-              {c.rpid.length ? (
-                c.rpid.map((r) => <RpidChip key={r} rpid={r} onLocate={props.onLocateRpid} />)
+              {c.refs.length ? (
+                c.refs.map((r) => <RefChip key={r} refId={r} onLocate={props.onLocateRef} />)
               ) : (
                 <span className="faint warn">无引用（该观点未指向任何真实评论）</span>
               )}
@@ -142,8 +143,8 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
           <div key={i} className="stack" style={{ gap: 4 }}>
             <div>{f.statement}</div>
             <div className="row wrap" style={{ gap: 4 }}>
-              {f.evidenceRpids.length ? (
-                f.evidenceRpids.map((r) => <RpidChip key={r} rpid={r} onLocate={props.onLocateRpid} />)
+              {f.evidenceRefs.length ? (
+                f.evidenceRefs.map((r) => <RefChip key={r} refId={r} onLocate={props.onLocateRef} />)
               ) : (
                 <span className="faint">无引用</span>
               )}
@@ -157,10 +158,10 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
   // 可验证性提示：只在真的有问题时出现，避免噪声
   const integrityWarnings: string[] = [];
   if (claimsWithoutCitation > 0) {
-    integrityWarnings.push(`${claimsWithoutCitation} 条观点没有 rpid 引用`);
+    integrityWarnings.push(`${claimsWithoutCitation} 条观点没有评论引用`);
   }
-  if (unknownRpids.length > 0) {
-    integrityWarnings.push(`${unknownRpids.length} 个引用在本批评论中不存在（模型可能臆造）`);
+  if (unknownRefs.length > 0) {
+    integrityWarnings.push(`${unknownRefs.length} 个引用不在本批样本内（模型可能臆造）`);
   }
 
   return (
@@ -211,12 +212,12 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
                   {typeof t.mentionCount === 'number' && <span className="faint"> · 提及 {t.mentionCount} 条</span>}
                 </div>
                 <div className="row wrap" style={{ gap: 4 }}>
-                  {t.rpids.length ? (
-                    t.rpids.slice(0, 12).map((r) => <RpidChip key={r} rpid={r} onLocate={props.onLocateRpid} />)
+                  {t.refs.length ? (
+                    t.refs.slice(0, 12).map((r) => <RefChip key={r} refId={r} onLocate={props.onLocateRef} />)
                   ) : (
                     <span className="faint warn">未给出对应评论</span>
                   )}
-                  {t.rpids.length > 12 && <span className="faint">…共 {t.rpids.length} 条</span>}
+                  {t.refs.length > 12 && <span className="faint">…共 {t.refs.length} 条</span>}
                 </div>
               </div>
             ))}
@@ -226,12 +227,12 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
       </Section>
 
       {/* 4 支持观点 */}
-      <Section index={4} title="支持观点" hint="每项须带 rpid 引用">
+      <Section index={4} title="支持观点" hint="每项须带评论引用">
         <ClaimList claims={result.support} emptyText="未提炼出支持观点" />
       </Section>
 
       {/* 5 质疑 / 反对观点 */}
-      <Section index={5} title="质疑 / 反对观点" hint="每项须带 rpid 引用">
+      <Section index={5} title="质疑 / 反对观点" hint="每项须带评论引用">
         <ClaimList claims={result.opposition} emptyText="未提炼出反对观点" />
       </Section>
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Nav } from '../components/Nav';
+import { DataPortPanel } from '../components/DataPortPanel';
 import { CreatorCollector } from '@collectors/creator-collector';
 import { VideoCollector } from '@collectors/video-collector';
 import { creatorRepo, videoRepo, videoSnapshotRepo } from '@repositories/index';
@@ -160,6 +161,9 @@ export function MyDataPage() {
           <div className="faint">如果某项显示「–」，代表暂无快照（不是 0）。</div>
         </section>
       )}
+
+      {/* V3.1.0 · P1：数据导入 / 导出 */}
+      <DataPortPanel />
     </div>
   );
 }

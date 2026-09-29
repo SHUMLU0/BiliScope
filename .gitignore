@@ -42,8 +42,7 @@ tmp/
 .git-commit-msg.txt
 
 # 工作区
-.workbuddy/memory/
-.workbuddy/skills/
+.workbuddy/
 
 # crxjs 输出
 .crxjs/

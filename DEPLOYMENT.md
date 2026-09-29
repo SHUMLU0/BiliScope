@@ -156,14 +156,15 @@ AI 分析走统一编排：**Provider → 请求 → 结构化输出 → Zod 校
 - 详见 `ai-history.html`（「AI 历史」）——可按类型筛选、展开查看每次请求的原始 prompt 与响应。
 
 ## 十一、版本
-当前：**v3.0.2**（**V3.0.2 —— AI 开放测试模式**。解除 BiliScope 自我施加的 AI 请求/输出限制，只保留 Provider 自身限制：
-① 输出上限默认 **Auto** —— 请求体省略 `max_tokens`，删除 V3.0.1 的 comment=4096 任务级硬编码，仅 Provider `requiresMaxTokens` 时回退 8192；
-② **`probe_guarded` 探针守护策略** —— 极轻探针（max_tokens=32 / 非流式 / 非评论数据）与真实分析**并行**启动，看门 30s 无探针响应 → `REQUEST_PROBE_TIMEOUT`；
-探针通过 → **取消一切人为总时长限制**（30s/60s/120s 强杀绝对禁止）；
-③ **AI Test Mode** 一键关闭全部人为限制（UI 明示不代表模型无限上下文/无限输出）；
-④ 探针审计分区 `requestType='probe'|'analysis'`，探针 token 不计入分析成本，UI 显示 `Probe 0.8s · Analysis 37.2s`；
-⑤ 样本量放宽至 `[60,80,120,160,200]`；⑥ 新增失败码 `OUTPUT_LIMIT_PROVIDER`（输出超限，优先于 context-too-large）；
-⑦ 分析可取消；⑧ 审计回写改为按 id `get`+`put`（修复 probe_guarded 下回写静默失败）。
-承接 V3.0.1 稳定性/性能/UI/文档维护版 → V3.0.0 可验证 AI 分析系统 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V0.2.1 评论采集真实性修复（`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
+当前：**v3.1.0**（**V3.1.0 —— Research Workspace（研究工作台）**。核心：AI 评论数据**隐私化**与工作台 UI：
+① **AI 匿名引用**——AI 请求完全不含 rpid/uname/mid/videoId，模型只见 `{ref:"C001",…}`；
+`ref→rpid` 映射（citationMap）只随产品结果落本地库，绝不发送 Provider；UI 点击 ref 经映射回溯；
+② **AI 时长策略**——流式空闲超时默认 **300s**，可选 60/120/180/300/**不限制**（null 只是不建 idle
+timer，AbortController 保留，真实断连/取消仍必须失败）；**AI Test Mode 下 orchestrator 强制归一为
+不限制**；③ **研究台 Dashboard**（新首页，只读 IndexedDB 禁联网，KPI 排除探针行）；
+④ **Popup 重做**（上下文卡 / 快速操作 / 最近任务 / 零 inline style）；
+⑤ **视频库 / 选题库 / Idea→Experiment / 导入导出 UI**；
+⑥ **导出版本号修复**（EXPORT-VERSION-001：硬编码 '0.1.0' → `__APP_VERSION__` 单一来源 package.json）。
+承接 V3.0.2 AI 开放测试模式 → V3.0.1 稳定性/性能/UI/文档维护版 → V3.0.0 可验证 AI 分析系统 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V0.2.1 评论采集真实性修复（`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
 
-历史版本：v3.0.1 / v3.0.0 / v0.2.2 / v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。
+历史版本：v3.0.2 / v3.0.1 / v3.0.0 / v0.2.2 / v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。

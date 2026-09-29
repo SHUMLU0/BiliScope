@@ -1,8 +1,50 @@
-# FINAL_AUDIT.md — BiliScope V3.0.2 最终审计
+# FINAL_AUDIT.md — BiliScope V3.1.0 最终审计
 
-> 生成于 2026-09-29 · 当前版本 **V3.0.2**（AI 开放测试模式）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-29 · 当前版本 **V3.1.0**（Research Workspace）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
 >
-> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → V3.0.1 稳定性 / 性能 / UI / 文档维护版 → **V3.0.2 AI 开放测试模式**
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → V3.0.1 稳定性 / 性能 / UI / 文档维护版 → V3.0.2 AI 开放测试模式 → **V3.1.0 Research Workspace**
+
+---
+
+## 0x0. V3.1.0 Research Workspace
+
+> 定位：**AI 评论数据隐私化 + 研究工作台 UI**。
+> 「真实 ID 留在本地，所有引用可回溯，所有 AI 结果可审计。」
+> **不改**：采集层 / CommentCollector / WBI / Dexie 数据层 / 探针审计分区；**不删**历史数据与历史审计。
+
+### 交付项
+
+| # | 交付 | 实现 | 测试 |
+|---|---|---|---|
+| 1 | AI 评论数据隐私化 | ref 分配在 prepare 层（C001 起 3 位补零）；prompt/facts/JSON Schema **三处全匿名**（无 rpid/uname/mid/videoId）；schema 字段重命名 `evidenceRpids→evidenceRefs / rpid→refs / rpids→refs`；`citationMap` 随 `CommentAnalysis` 落库（**绝不发送 Provider**）；UI RefChip 经映射回溯，旧记录如实降级 | `AI-PRIVACY-001..004` |
+| 2 | topComments 语义收紧 | 高赞事实只从 sample 内选取——AI 只能引用它真正见过的 ref | `AI-PRIVACY-001` |
+| 3 | AI 时长策略 | `DEFAULT_IDLE_TIMEOUT_MS = 300s`；`AnalyzeRequest.idleTimeoutMs`（undefined=默认 / number / **null=不限制，AbortController 保留**）；设置页「AI 时长策略」60/120/180/300/不限制；非流式 fallback 总超时同选项（`FALLBACK_TIMEOUT_MS=300s`） | `TIMEOUT-001..003` |
+| 4 | Test Mode 硬归一 | `orchestrate` 内 `openTestMode ? null : opts.idleTimeoutMs`（不依赖 UI 传参） | `TIMEOUT-003` |
+| 5 | 研究台 Dashboard | `dashboard.html`（Nav 首位 + Popup 入口）：7 KPI（AI 分析**排除探针行**）+ 最近 AI 分析 / 评论研究表 + 空态引导；**只读 IndexedDB 禁联网** | — |
+| 6 | Popup 重做 | 上下文卡 / 快速操作网格 / 最近任务 / 零 inline style（新 `popup.css`）；修复 `#video=` 无效链接 → `?bvid=` | — |
+| 7 | 视频库 / 选题库 / Idea→Experiment / 导入导出 | `video-research` 三件套（4 种排序按最新快照）；TopicPanel（upsertByName + 删除）；ExperimentPanel + `createExperimentFromIdea`（ideaId 闭环 + 状态推进）；DataPortPanel（Zod 预检如实计数 + replace 二次确认） | — |
+| 8 | 导出版本号修复（EXPORT-VERSION-001） | `exportAll().version` 硬编码 `'0.1.0'` → `__APP_VERSION__`（vite + vitest 双 define，单一来源 package.json）；options「关于」V0.1 硬编码同步修复 | `EXPORT-VERSION-001` |
+
+### 关键不变量（V3.1.0 后成立）
+
+- V3.0.2 全部不变量继续成立（Auto max_tokens、probe_guarded 并行、审计分区、按 id get+put 回写、反幽灵双防线——DOMAIN_SHAPE_KEYS 结构签名 + superRefine，仅键名语义从 rpid 换成 ref）。
+- **AI 请求零身份信息**：prompt / facts / JSON Schema 任何位置不含 rpid / uname / mid / videoId。
+- **citationMap 只在本地**：随 `CommentAnalysis` 落库；`AIAnalysis`（审计）不含映射；旧记录读出 `default({})` 后 UI 如实降级。
+- **null ≠ 删除中止能力**：`idleTimeoutMs=null` 只省略 idle timer；AbortController / 外部 signal / 真实断连路径全部保留（行为测试：挂起流 + 外部 abort 必须 reject）。
+- 版本号六处对齐 `3.1.0`。
+
+### 门禁实测结果（本地，2026-09-29）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| test | `vitest run` | **PASS** 403 passed / 2 skipped / 0 failed（38 文件，含 AI-PRIVACY 5 + TIMEOUT 5 + EXPORT-VERSION-001） |
+| typecheck | `tsc --noEmit` | PASS（EXIT=0） |
+| lint / build / test:dist / scan-secrets / acceptance | 见门禁链章节 | 发布前统一执行（见 #64） |
+
+### 真实性边界（本审计不粉饰）
+
+- Real Provider E2E：依赖使用者本地 API Key，仓库内自动化测试使用 **mock fetch** → 若本地无可用 Provider，报告为 **REAL AI ENVIRONMENT LIMITED**，**不得**当作 `REAL AI PASS`。
+- Chrome E2E：命令行 `--load-extension` 在本机不加载未打包扩展 → **`CHROME_E2E_ENV_LIMITED`**（≠ FAIL）。
 
 ---
 

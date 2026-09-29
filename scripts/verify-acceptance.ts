@@ -347,10 +347,10 @@ async function main(): Promise<void> {
     const GOOD_RESULT = {
       summary: '验收：评论区以讨论画质为主',
       facts: ['样本 3 条'],
-      findings: [{ type: 'theme', statement: '画质是主要话题', evidenceRpids: ['101'] }],
-      themes: [{ name: '画质', rpids: ['101'] }],
-      support: [{ statement: '认可画质', rpid: ['101'] }],
-      opposition: [{ statement: '认为更新慢', rpid: ['102'] }],
+      findings: [{ type: 'theme', statement: '画质是主要话题', evidenceRefs: ['C001'] }],
+      themes: [{ name: '画质', refs: ['C001'] }],
+      support: [{ statement: '认可画质', refs: ['C001'] }],
+      opposition: [{ statement: '认为更新慢', refs: ['C002'] }],
       needs: ['提高更新频率'],
       questions: ['下期何时出'],
       uncertainty: ['样本仅 3 条，不能代表整体'],
@@ -391,7 +391,8 @@ async function main(): Promise<void> {
       targetId: 'BV1xxxxxxxxx',
       systemPrompt: 'sys',
       userPrompt: 'user',
-      knownRpids: ['101', '102', '103'],
+      knownRefs: ['C001', 'C002', 'C003'],
+      citationMap: { C001: '101', C002: '102', C003: '103' },
     });
     // V3.0.2 Auto：main 请求体**省略** max_tokens（不再有 4096 任务级硬编码）。
     // Probe 与 Main 并行，bodies 只收 main 请求；审计行 = probe 1 + analysis 1。
@@ -480,7 +481,8 @@ async function main(): Promise<void> {
       targetId: 'BV1xxxxxxxxx',
       systemPrompt: 'sys',
       userPrompt: 'user',
-      knownRpids: ['101'],
+      knownRefs: ['C001'],
+      citationMap: { C001: '101' },
     });
 
     // 无效 JSON 场景：两次都失败 → 绝不写 CommentAnalysis
@@ -510,7 +512,8 @@ async function main(): Promise<void> {
       targetId: 'BV1xxxxxxxxx',
       systemPrompt: 'sys',
       userPrompt: 'user',
-      knownRpids: ['101'],
+      knownRefs: ['C001'],
+      citationMap: { C001: '101' },
     });
 
     const storedAfterFail = (await db.commentAnalyses.toArray()).length;

@@ -26,8 +26,8 @@ import { logger } from '@utils/logger';
 import { linkExternalSignal } from './probe';
 import {
   FALLBACK_TIMEOUT_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
   STREAM_FIRST_BYTE_TIMEOUT_MS,
-  STREAM_IDLE_TIMEOUT_MS,
   consumeSseStream,
   parseSseDataLines,
 } from './streaming';
@@ -206,10 +206,16 @@ export class OpenAICompatibleAdapter implements AIProvider {
     let receivedChars = 0;
     let timedOut = false;
 
+    // V3.1.0 · P0：空闲上限请求级参数化。
+    //   undefined = 默认 300s；number = 指定毫秒；null = **不限制**（不设空闲 timer）。
+    //   ⚠️ null ≠ 删除中止能力：AbortController 与外部 signal 照常工作，真实断连仍会失败。
+    const idleLimitMs: number | null =
+      req.idleTimeoutMs === null ? null : (req.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS);
+
     // 空闲看门狗：每 1s 检查一次「距上次新数据」。
     // 首字节尚未到达时用 STREAM_FIRST_BYTE_TIMEOUT_MS 判定（同样不立即杀，
     // 而是在超过该阈值后把提示语切到「模型尚未返回首个响应」，真正的终止
-    // 仍由 STREAM_IDLE_TIMEOUT_MS 统一决定 —— 避免两种阈值互相打架）。
+    // 仍由空闲上限统一决定 —— 避免两种阈值互相打架）。
     const watchdog = setInterval(() => {
       const now = performance.now();
       const idleSince = lastChunkAt === 0 ? startedAt : lastChunkAt;
@@ -222,7 +228,7 @@ export class OpenAICompatibleAdapter implements AIProvider {
         receivedChars,
         chunkCount,
       });
-      if (idleMs >= STREAM_IDLE_TIMEOUT_MS) {
+      if (idleLimitMs !== null && idleMs >= idleLimitMs) {
         timedOut = true;
         ctrl.abort();
       }
@@ -241,7 +247,7 @@ export class OpenAICompatibleAdapter implements AIProvider {
       // 绝不把「被取消」伪装成「超时」。
       if (timedOut) {
         throw new Error(
-          `stream idle timeout: 连续 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} 秒没有收到任何新响应`,
+          `stream idle timeout: 连续 ${Math.round((idleLimitMs ?? 0) / 1000)} 秒没有收到任何新响应`,
         );
       }
       throw e;
@@ -330,7 +336,7 @@ export class OpenAICompatibleAdapter implements AIProvider {
     }
 
     if (timedOut) {
-      throw new Error(`stream idle timeout: 连续 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} 秒没有收到任何新响应`);
+      throw new Error(`stream idle timeout: 连续 ${Math.round((idleLimitMs ?? 0) / 1000)} 秒没有收到任何新响应`);
     }
     if (providerError) {
       throw new Error(`provider error: ${providerError}`);
@@ -354,7 +360,9 @@ export class OpenAICompatibleAdapter implements AIProvider {
    *
    * V3.0.2：`req.noTotalTimeout = true`（probe_guarded healthy / AI Test Mode）时
    * **不设** BiliScope 人为的总时长 timer —— 请求只由 Provider 完成 / 明确错误 /
-   * 真实断连 / 外部中止来结束。默认策略（single）仍保留 120s 兜底。
+   * 真实断连 / 外部中止来结束。默认策略（single）仍保留总超时兜底。
+   * V3.1.0：`req.idleTimeoutMs === null`（「不限制」）同样不设总时长 timer；
+   * 非流式总超时与流式空闲上限**同选项**（见 analyze）。
    */
   private async sendOnce(
     req: AnalyzeRequest,
@@ -364,7 +372,8 @@ export class OpenAICompatibleAdapter implements AIProvider {
   ): Promise<ChatResp> {
     const ctrl = new AbortController();
     const unlink = linkExternalSignal(req.signal, ctrl);
-    const t = req.noTotalTimeout ? null : setTimeout(() => ctrl.abort(), timeoutMs);
+    const noTotal = req.noTotalTimeout === true || req.idleTimeoutMs === null;
+    const t = noTotal ? null : setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const res = await fetch(this.endpoint(), {
         method: 'POST',
@@ -389,7 +398,12 @@ export class OpenAICompatibleAdapter implements AIProvider {
     let mode = this.resolveStructuredOutput(req);
     let responseFormat = this.buildResponseFormat(mode, req);
     const useStream = this.resolveStreaming(req);
-    const fallbackTimeout = this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    // V3.1.0：非流式总超时与流式空闲上限**同选项**（60/120/180/300s/不限制）。
+    // `idleTimeoutMs === null`（不限制）时该值不会被使用 —— sendOnce 内部短路不建 timer。
+    const fallbackTimeout: number =
+      typeof req.idleTimeoutMs === 'number'
+        ? req.idleTimeoutMs
+        : (this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
     let data: ChatResp;
     let streamMeta: StreamMeta | undefined;
@@ -518,4 +532,4 @@ interface StreamMeta {
   receivedChars: number;
 }
 
-export { STREAM_FIRST_BYTE_TIMEOUT_MS, STREAM_IDLE_TIMEOUT_MS };
+export { STREAM_FIRST_BYTE_TIMEOUT_MS, DEFAULT_IDLE_TIMEOUT_MS };

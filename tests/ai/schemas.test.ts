@@ -21,12 +21,12 @@ const validResult = {
   summary: '评论区整体正面，主要讨论画质与更新频率。',
   facts: ['样本共 120 条评论', '最高点赞 320'],
   findings: [
-    { type: 'theme' as const, statement: '画质是主要讨论点', evidenceRpids: ['1001', '1002'] },
-    { type: 'painpoint' as const, statement: '更新太慢', evidenceRpids: ['1003'] },
+    { type: 'theme' as const, statement: '画质是主要讨论点', evidenceRefs: ['C001', 'C002'] },
+    { type: 'painpoint' as const, statement: '更新太慢', evidenceRefs: ['C003'] },
   ],
-  themes: [{ name: '画质', rpids: ['1001', '1002'] }],
-  support: [{ statement: '多数人认可画质', rpid: ['1001', '1002'] }],
-  opposition: [{ statement: '有人认为更新频率不足', rpid: ['1003'] }],
+  themes: [{ name: '画质', refs: ['C001', 'C002'] }],
+  support: [{ statement: '多数人认可画质', refs: ['C001', 'C002'] }],
+  opposition: [{ statement: '有人认为更新频率不足', refs: ['C003'] }],
   needs: ['希望提高更新频率'],
   questions: ['下一期什么时候出？'],
   uncertainty: ['仅抽取 120 条，存在抽样偏差'],
@@ -53,24 +53,24 @@ describe('commentAIResultSchema（领域契约）', () => {
   it('rejects wrong finding.type enum value', () => {
     const bad = {
       ...validResult,
-      findings: [{ type: 'guess', statement: 'x', evidenceRpids: [] }],
+      findings: [{ type: 'guess', statement: 'x', evidenceRefs: [] }],
     };
     const r = commentAIResultSchema.safeParse(bad);
     expect(r.success).toBe(false);
   });
 
-  it('rejects CitedClaim without rpid array (禁止无引用论断)', () => {
+  it('rejects CitedClaim without refs array (禁止无引用论断)', () => {
     const r = citedClaimSchema.safeParse({ statement: '多数用户都支持' });
-    // rpid 缺失 → default [] → 通过 schema，但 claimsWithoutCitation 审计会捕获
+    // refs 缺失 → default [] → 通过 schema，但 claimsWithoutCitation 审计会捕获
     expect(r.success).toBe(true);
-    expect(r.success && r.data.rpid).toEqual([]);
+    expect(r.success && r.data.refs).toEqual([]);
     // 类型错误必须被拒
-    const bad = citedClaimSchema.safeParse({ statement: 'x', rpid: '1001' });
+    const bad = citedClaimSchema.safeParse({ statement: 'x', refs: 'C001' });
     expect(bad.success).toBe(false);
   });
 
-  it('rejects finding with non-string evidenceRpids entries', () => {
-    const r = findingSchema.safeParse({ type: 'theme', statement: 'x', evidenceRpids: [1001] });
+  it('rejects finding with non-string evidenceRefs entries', () => {
+    const r = findingSchema.safeParse({ type: 'theme', statement: 'x', evidenceRefs: ['C001', 42] });
     expect(r.success).toBe(false);
   });
 

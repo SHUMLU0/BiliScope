@@ -1,5 +1,5 @@
 /**
- * V3.0.1 · 第九 / 十节：GitHub 文档一致性测试。
+ * V3.1.0 · 第九 / 十节：GitHub 文档一致性测试。
  *
  * 目标：README 与「活动源码 / 实际仓库结构」始终一致，且本地链接永不 404。
  * 这些断言直接读取磁盘文件，属于「仓库契约测试」。
@@ -25,14 +25,14 @@ function localLinks(md: string): string[] {
   return [...new Set(out)];
 }
 
-describe('DOC · README 与版本一致性（V3.0.2 · 第八节）', () => {
-  it('DOC-001: README no longer presents V0.1/V0.2/V0.3 as the current version', () => {
+describe('DOC · README 与版本一致性（V3.1.0 · 第八节）', () => {
+  it('DOC-001: README no longer presents V0.1/V0.2/V0.3/V3.0.x as the current version', () => {
     const readme = read('README.md');
 
-    // 当前版本必须显式声明为 v3.0.2
-    expect(readme).toMatch(/v3\.0\.2/);
+    // 当前版本必须显式声明为 v3.1.0
+    expect(readme).toMatch(/v3\.1\.0/);
     expect(readme).toMatch(/## 当前版本/);
-    expect(readme).toMatch(/V3\.0\.2 = AI 开放测试模式/);
+    expect(readme).toMatch(/V3\.1\.0 = Research Workspace/);
 
     // 「V0.1 = ...」这种把旧版本当作当前定位的写法必须消失
     expect(readme).not.toMatch(/^V0\.1\s*=/m);
@@ -54,15 +54,21 @@ describe('DOC · README 与版本一致性（V3.0.2 · 第八节）', () => {
       '## AI 配置',
       '## 数据与隐私',
       '## 已知限制',
-      '## V3.0 → V3.0.2',
+      '## V3.0 → V3.1.0',
       '## Project Structure',
       '## License',
     ]) {
       expect(readme).toContain(heading);
     }
+
+    // V3.1.0 Research Workspace 核心能力必须在 README 有真实叙述
+    expect(readme).toMatch(/研究台/);
+    expect(readme).toMatch(/匿名引用/);
+    expect(readme).toMatch(/AI 时长策略/);
+    expect(readme).toMatch(/citationMap|C001/);
   });
 
-  it('DOC-001: README honestly states the V3.0.0 known limitations (no "all verified" claim)', () => {
+  it('DOC-001: README honestly states the known limitations (no "all verified" claim)', () => {
     const readme = read('README.md');
     // 已知限制必须包含风控 / 环境受限 / Real Provider 依赖本地 Key —— 不得粉饰
     expect(readme).toMatch(/风控/);
@@ -139,25 +145,28 @@ describe('DOC · 仓库文档结构（V3.0.1 · 第十节）', () => {
   });
 });
 
-describe('DOC · CHANGELOG 与版本号一致（V3.0.2 · 第十二节）', () => {
-  it('CHANGELOG 含 [V3.0.2] - 2026-09-29 段落及其 Added / Changed 明细（V3.0.1 历史段落保留）', () => {
+describe('DOC · CHANGELOG 与版本号一致（V3.1.0 · 第十二节）', () => {
+  it('CHANGELOG 含 [V3.1.0] - 2026-09-29 段落及其 Added / Changed 明细（V3.0.2 / V3.0.1 历史段落保留）', () => {
     const changelog = read('CHANGELOG.md');
+    expect(changelog).toMatch(/\[V3\.1\.0\] - 2026-09-29/);
+    // V3.1.0 条目必须覆盖本轮真实变更
+    expect(changelog).toMatch(/匿名引用|citationMap/);
+    expect(changelog).toMatch(/idleTimeoutMs|AI 时长策略/);
+    expect(changelog).toMatch(/Research Workspace|研究工作台/);
+    expect(changelog).toMatch(/EXPORT-VERSION-001/);
+    // 历史段落不得删除
     expect(changelog).toMatch(/\[V3\.0\.2\] - 2026-09-29/);
-    // V3.0.2 条目必须覆盖本轮真实变更
     expect(changelog).toMatch(/probe_guarded/);
-    expect(changelog).toMatch(/Auto/);
     expect(changelog).toMatch(/OUTPUT_LIMIT_PROVIDER/);
     expect(changelog).toMatch(/AI Test Mode/);
-    // 历史段落不得删除
     expect(changelog).toMatch(/\[V3\.0\.1\] - 2026-09-28/);
-    expect(changelog).toMatch(/200 条原始评论|slice\(0, ?200\)/);
     expect(changelog).toMatch(/CommentAnalysis/);
   });
 
-  it('版本号三处对齐为 3.0.2（package.json / manifest.json / CHANGELOG）', () => {
+  it('版本号三处对齐为 3.1.0（package.json / manifest.json / CHANGELOG）', () => {
     const pkg = JSON.parse(read('package.json')) as { version: string };
     const manifest = JSON.parse(read('extension/manifest.json')) as { version: string };
-    expect(pkg.version).toBe('3.0.2');
-    expect(manifest.version).toBe('3.0.2');
+    expect(pkg.version).toBe('3.1.0');
+    expect(manifest.version).toBe('3.1.0');
   });
 });

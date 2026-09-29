@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_IDLE_TIMEOUT_MS,
   FALLBACK_TIMEOUT_MS,
   STREAM_FIRST_BYTE_TIMEOUT_MS,
-  STREAM_IDLE_TIMEOUT_MS,
   consumeSseStream,
   parseSseDataLines,
 } from '@ai/streaming';
@@ -13,23 +13,22 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('streaming · 超时常量（任务书硬性数字）', () => {
-  it('首个响应等待 = 30s', () => {
+describe('streaming · 超时常量（V3.1.0 任务书硬性数字）', () => {
+  it('首个响应等待 = 30s（仅提示，绝不当总时长上限用）', () => {
     expect(STREAM_FIRST_BYTE_TIMEOUT_MS).toBe(30_000);
   });
 
-  it('连续无新 chunk 上限 = 120s', () => {
-    expect(STREAM_IDLE_TIMEOUT_MS).toBe(120_000);
+  it('TIMEOUT-001: 流式空闲默认上限 = 300s（V3.1.0：120s → 300s 放宽）', () => {
+    expect(DEFAULT_IDLE_TIMEOUT_MS).toBe(300_000);
   });
 
-  it('非流式 fallback 默认超时 = 120s（与流式空闲上限一致）', () => {
-    expect(FALLBACK_TIMEOUT_MS).toBe(120_000);
+  it('TIMEOUT-001: 非流式 fallback 默认超时 = 300s（与默认空闲上限一致）', () => {
+    expect(FALLBACK_TIMEOUT_MS).toBe(300_000);
   });
 
   it('不存在「30s 总时长硬切断」意义上的常量', () => {
     // 30s 只作为首字节提示阈值，绝不能被当作总时长上限使用
-    expect(STREAM_IDLE_TIMEOUT_MS).not.toBe(30_000);
-    expect(FALLBACK_TIMEOUT_MS).not.toBe(30_000);
+    expect(DEFAULT_IDLE_TIMEOUT_MS).not.toBe(30_000);
   });
 });
 

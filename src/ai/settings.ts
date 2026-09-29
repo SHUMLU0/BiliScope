@@ -127,3 +127,58 @@ export function isValidProviderConfig(cfg: ProviderConfig | null): cfg is Provid
 }
 
 export type { Store as ProviderStore };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V3.1.0 · P0-AI 时长放宽：全局「流式空闲超时」偏好（非 per-Provider）。
+//
+// 三态语义与 AnalyzeRequest.idleTimeoutMs 一致：
+//   - `undefined`（key 不存在）= 跟随默认 300s（DEFAULT_IDLE_TIMEOUT_MS）；
+//   - `number`  = UI 指定（60/120/180/300s）；
+//   - `null`    = **不限制**（不创建 idle timer；AbortController 仍保留）。
+// Test Mode 是更硬的全局开关（orchestrator 强制归一 null），本偏好只在非 Test Mode 生效。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const IDLE_KEY = 'biliscope.ai.idleTimeout.v1';
+
+export type IdleTimeoutPref = number | null | undefined;
+
+function parseIdleTimeout(raw: string | null | undefined): IdleTimeoutPref {
+  if (raw == null || raw === '') return undefined;
+  if (raw === 'unlimited') return null;
+  const n = Number(raw);
+  // 防御：损坏/过小的值一律回落默认（最短 1s，正常选项从 60s 起）
+  return Number.isFinite(n) && n >= 1_000 ? n : undefined;
+}
+
+export async function loadIdleTimeoutAsync(): Promise<IdleTimeoutPref> {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      const got = await chrome.storage.local.get(IDLE_KEY);
+      return parseIdleTimeout(got[IDLE_KEY] as string | undefined);
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    return parseIdleTimeout(localStorage.getItem(IDLE_KEY));
+  } catch {
+    return undefined;
+  }
+}
+
+export async function saveIdleTimeout(v: number | null): Promise<void> {
+  const raw = v === null ? 'unlimited' : String(v);
+  try {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      await chrome.storage.local.set({ [IDLE_KEY]: raw });
+      return;
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    localStorage.setItem(IDLE_KEY, raw);
+  } catch {
+    /* ignore */
+  }
+}

@@ -53,10 +53,10 @@ function saveCfg(active = 'openai-compatible', extra: Record<string, unknown> = 
 const GOOD: CommentAIResult = {
   summary: '评论区以正面为主',
   facts: ['样本 3 条'],
-  findings: [{ type: 'theme', statement: '画质被讨论', evidenceRpids: ['101'] }],
-  themes: [{ name: '画质', rpids: ['101'] }],
-  support: [{ statement: '认可画质', rpid: ['101'] }],
-  opposition: [{ statement: '更新慢', rpid: ['102'] }],
+  findings: [{ type: 'theme', statement: '画质被讨论', evidenceRefs: ['C001'] }],
+  themes: [{ name: '画质', refs: ['C001'] }],
+  support: [{ statement: '认可画质', refs: ['C001'] }],
+  opposition: [{ statement: '更新慢', refs: ['C002'] }],
   needs: ['提高更新频率'],
   questions: ['下期何时出'],
   uncertainty: ['样本量小'],
@@ -130,7 +130,10 @@ const BASE_OPTS = {
   targetId: 'v_test',
   systemPrompt: 'sys',
   userPrompt: 'user',
-  knownRpids: ['101', '102', '103'],
+  // V3.1.0：白名单 = 模型可见的匿名 ref
+  knownRefs: ['C001', 'C002', 'C003'],
+  // V3.1.0：ref → 真实 rpid 本地映射（落库回溯用）
+  citationMap: { C001: '101', C002: '102', C003: '103' },
   // V3.0.2：本文件的既有用例全部使用 `single` 策略（V3.0.1 旧行为、不发 Probe），
   // 保证「调用次数 / 请求顺序」断言语义不变。probe_guarded 的专项测试见 probes.test.ts。
   requestStrategy: 'single' as const,
@@ -527,40 +530,54 @@ describe('orchestrate · Provider 不错配', () => {
   });
 });
 
-describe('引用可验证性', () => {
-  it('auditCitations flags rpids that do not exist in the sample', () => {
+describe('引用可验证性（V3.1 匿名 ref）', () => {
+  it('auditCitations flags refs that do not exist in the sample', () => {
     const withFake: CommentAIResult = {
       ...GOOD,
-      support: [{ statement: '有人这么说', rpid: ['101', 'rp_does_not_exist'] }],
-      opposition: [{ statement: '无引用的论断', rpid: [] }],
+      support: [{ statement: '有人这么说', refs: ['C001', 'C404'] }],
+      opposition: [{ statement: '无引用的论断', refs: [] }],
     };
-    const a = auditCitations(withFake, ['101', '102']);
-    expect(a.unknownRpids).toEqual(['rp_does_not_exist']);
+    const a = auditCitations(withFake, ['C001', 'C002']);
+    expect(a.unknownRefs).toEqual(['C404']);
     expect(a.claimsWithoutCitation).toBe(1);
     // support 2 + opposition 0 + themes 1 + findings 1 = 4
     expect(a.totalCitations).toBe(4);
   });
 
   it('auditCitations counts every citation and every uncited claim', () => {
-    const a = auditCitations(GOOD, ['101', '102']);
-    expect(a.unknownRpids).toEqual([]);
+    const a = auditCitations(GOOD, ['C001', 'C002']);
+    expect(a.unknownRefs).toEqual([]);
     expect(a.claimsWithoutCitation).toBe(0);
     // support 1 + opposition 1 + themes 1 + findings 1 = 4
     expect(a.totalCitations).toBe(4);
   });
 });
 
-describe('mapToCommentAnalysis（领域投影）', () => {
-  it('maps the AI structure into the product record and keeps citations', () => {
-    const rec = mapToCommentAnalysis(GOOD, { videoId: 'v1', model: 'm' });
+describe('mapToCommentAnalysis（领域投影 + V3.1 匿名引用回溯）', () => {
+  it('maps the AI structure into the product record, traces refs back to real rpids, and stores citationMap', () => {
+    const rec = mapToCommentAnalysis(GOOD, {
+      videoId: 'v1',
+      model: 'm',
+      citationMap: { C001: '101', C002: '102' },
+    });
     expect(rec.videoId).toBe('v1');
     expect(rec.model).toBe('m');
+    // 渲染文本经映射回真实 rpid（本地口径）
     expect(rec.supportResult[0]).toContain('101');
     expect(rec.oppositionResult[0]).toContain('102');
     expect(rec.citedCommentRpids.sort()).toEqual(['101', '102']);
     expect(rec.themeResult[0]).toContain('画质');
+    // V3.1.0：citationMap 必须随产品结果落库
+    expect(rec.citationMap).toEqual({ C001: '101', C002: '102' });
     // 情绪未由结构化输出提供 → 明确写进 uncertainty，而不是假装是 0 情绪
     expect(rec.uncertaintyNote).toMatch(/未由结构化输出提供/);
+  });
+
+  it('falls back to the raw ref when no citationMap is provided (legacy-safe)', () => {
+    const rec = mapToCommentAnalysis(GOOD, { videoId: 'v1', model: 'm' });
+    expect(rec.supportResult[0]).toContain('C001');
+    expect(rec.citedCommentRpids).toEqual([]);
+    expect(rec.citationMap).toEqual({});
   });
 });
 

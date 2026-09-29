@@ -1,7 +1,32 @@
-# BiliScope V3.0.2 进度表
+# BiliScope V3.1.0 进度表
 
 > 唯一进度表（Single Source of Truth）。
 > 状态：✅ 完成 / 🔄 进行中 / ⏸ 阻塞 / ⬜ 未开始
+
+---
+
+## V3.1.0 「Research Workspace（研究工作台）」
+
+> 定位：AI 评论数据**隐私化**（AI 只见匿名引用，真实 ID 留本地）+ 工作台 UI。
+> **AI 时长放宽**：空闲超时默认 300s / 可选不限制；**不得删除 AbortController**（真实断连仍必须失败）。
+> 不重写采集层 / CommentCollector / WBI / Dexie，不删历史数据与历史审计。
+
+| 编号 | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **P0-1** | AI 评论数据隐私化 | ✅ | ref 分配在 prepare 层；prompt/facts/schema 三处全匿名；schema 重命名 evidenceRefs/refs；`citationMap` 落库不发送；UI RefChip 回溯；`AI-PRIVACY-001..004` |
+| **P0-2** | AI 时长放宽 | ✅ | `DEFAULT_IDLE_TIMEOUT_MS=300s`；`idleTimeoutMs`（undefined/number/null）；双 adapter + orchestrator 透传；设置页「AI 时长策略」；`TIMEOUT-001..003`（真实 timer 行为测试） |
+| **P0-3** | Test Mode 硬归一 | ✅ | `openTestMode ? null : opts.idleTimeoutMs`（不依赖 UI 传参） |
+| **P0-4** | Popup 重做 | ✅ | 版本 tag + 上下文卡 + 快速操作网格 + 最近任务；零 inline style（新 popup.css）；修复 `#video=` 无效链接 |
+| **P0-5** | Dashboard 研究台 | ✅ | `dashboard.html`；7 KPI（AI 分析排除探针行）+ 两张最近表；只读禁联网；vite input + Nav 首位 |
+| **P1-1** | Video Research 页 | ✅ | 视频库三件套（300 条 / 过滤 / 4 排序 / 直达评论研究）；vite input + Nav + popup 入口 |
+| **P1-2** | Idea→Experiment UI | ✅ | ExperimentPanel + `createExperimentFromIdea`（ideaId 闭环 / 状态推进 / 记录结果） |
+| **P1-3** | Topic UI | ✅ | TopicPanel（upsertByName / 竞争度四档 / 删除；repo 补 remove） |
+| **P1-4** | Import/Export UI | ✅ | DataPortPanel 挂「我的数据」（导出 JSON / Zod 预检 / merge / replace 二次确认） |
+| **P1-5** | export version 修复 | ✅ | `EXPORT-VERSION-001`：硬编码 '0.1.0' → `__APP_VERSION__`（vite+vitest 双 define）；options「关于」同步 |
+| **D** | 文档同步 | ✅ | SPEC 归档 V0.1 + 重写为 V3.1.0 有效规格；六处对齐 `3.1.0`；docs-consistency 更新为 3.1.0 契约 |
+| **G** | 门禁链 | ⬜ | typecheck / lint / test / build / test:dist / scan-secrets / verify-acceptance → commit → push → CI → tag `v3.1.0` + Release → audit ZIP |
+
+本地已验证（截至文档同步完成）：typecheck EXIT=0；test **403 passed / 2 skipped**（38 文件）。
 
 ---
 

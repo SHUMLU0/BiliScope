@@ -26,31 +26,34 @@ export type FindingType = z.infer<typeof findingTypeEnum>;
 /**
  * AI 的解释性发现。
  * - `statement`：一句可独立阅读的判断
- * - `evidenceRpids`：支撑该判断的原始评论 rpid（字符串，保精度）；允许为空数组，
+ * - `evidenceRefs`：支撑该判断的**匿名评论引用**（C001 样式，与 prompt sample 一一对应）；允许为空数组，
  *   但为空时 UI 会显式标注「无引用」，不假装有证据。
+ *
+ * V3.1.0 · P0-AI 隐私化：字段从 `evidenceRpids` 重命名 —— AI 永远看不到真实 rpid，
+ * ref → rpid 的映射只存在于本地 CommentAnalysis.citationMap。
  */
 export const findingSchema = z.object({
   type: findingTypeEnum,
   statement: z.string().min(1).max(1000),
-  evidenceRpids: z.array(z.string().min(1)).max(50).default([]),
+  evidenceRefs: z.array(z.string().min(1)).max(50).default([]),
 });
 export type Finding = z.infer<typeof findingSchema>;
 
 /**
  * 带引用的论断（支持 / 反对共用）。
- * `rpid` 使用数组，因为一个论断常由多条评论共同支撑。
+ * `refs` 使用数组，因为一个论断常由多条评论共同支撑（匿名引用，C001 样式）。
  */
 export const citedClaimSchema = z.object({
   statement: z.string().min(1).max(1000),
-  rpid: z.array(z.string().min(1)).max(50).default([]),
+  refs: z.array(z.string().min(1)).max(50).default([]),
 });
 export type CitedClaim = z.infer<typeof citedClaimSchema>;
 
 /** 主题（comment 领域必需项） */
 export const themeSchema = z.object({
   name: z.string().min(1).max(200),
-  /** 主题对应的评论 rpid（原文引用） */
-  rpids: z.array(z.string().min(1)).max(100).default([]),
+  /** 主题对应的评论匿名引用（ref，原文可回溯） */
+  refs: z.array(z.string().min(1)).max(100).default([]),
   /** 提及该主题的评论条数（可选，模型不得编造；无法判断时省略） */
   mentionCount: z.number().int().nonnegative().optional(),
 });

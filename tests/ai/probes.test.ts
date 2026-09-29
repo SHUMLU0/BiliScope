@@ -43,10 +43,10 @@ function saveCfg(): void {
 const GOOD: CommentAIResult = {
   summary: '评论区以正面为主',
   facts: ['样本 3 条'],
-  findings: [{ type: 'theme', statement: '画质被讨论', evidenceRpids: ['101'] }],
-  themes: [{ name: '画质', rpids: ['101'] }],
-  support: [{ statement: '认可画质', rpid: ['101'] }],
-  opposition: [{ statement: '更新慢', rpid: ['102'] }],
+  findings: [{ type: 'theme', statement: '画质被讨论', evidenceRefs: ['C001'] }],
+  themes: [{ name: '画质', refs: ['C001'] }],
+  support: [{ statement: '认可画质', refs: ['C001'] }],
+  opposition: [{ statement: '更新慢', refs: ['C002'] }],
   needs: ['提高更新频率'],
   questions: ['下期何时出'],
   uncertainty: ['样本量小'],
@@ -60,7 +60,8 @@ const BASE_OPTS = {
   targetId: 'v_probe',
   systemPrompt: 'sys',
   userPrompt: 'user',
-  knownRpids: ['101', '102', '103'],
+  knownRefs: ['C001', 'C002', 'C003'],
+  citationMap: { C001: '101', C002: '102', C003: '103' },
 };
 
 interface ProbeMockOpts {

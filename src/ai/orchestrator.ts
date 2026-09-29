@@ -103,10 +103,27 @@ export interface OrchestrateOpts {
    * 任务级 4096 硬编码已废除；Auto ≠ 无限，模型自身极限仍会以 MAX_TOKENS 如实上报。
    */
   maxTokens?: number;
+  /**
+   * V3.1.0 · P0-AI 时长放宽：流式空闲超时（连续无新 chunk 才算）。
+   * - `undefined`：默认 300s（`DEFAULT_IDLE_TIMEOUT_MS`）；
+   * - `number`：UI 指定（60/120/180/300s）；
+   * - `null`：**不限制**（不创建 idle timer，但 AbortController 与外部 signal 保留——
+   *   真实断连 / 用户取消仍必须失败，**不得**借 null 删除中止能力）。
+   * 非流式 fallback 的总时长兜底跟随同一选项。
+   */
+  idleTimeoutMs?: number | null;
   /** 外部已算好的事实块（评论领域用它做 facts 一致性检查） */
   factsJson?: string;
-  /** 真实存在的 rpid 白名单：用于校验引用是否落空 */
-  knownRpids?: string[];
+  /**
+   * V3.1.0 · P0-AI 隐私化：真实存在的**匿名 ref** 白名单（C001 样式）。
+   * 用于校验模型引用是否落空 —— 模型只见过 ref，白名单也必须是 ref。
+   */
+  knownRefs?: string[];
+  /**
+   * V3.1.0 · P0-AI 隐私化：ref → 真实 rpidStr 的本地映射（由 prepare 层产出）。
+   * 随产品结果（CommentAnalysis）落库；**绝不**进入 prompt / Provider 请求。
+   */
+  citationMap?: Record<string, string>;
   /**
    * V3.0.1 · P0-A：流式进度回调（透传给 adapter）。
    * UI 用它显示「模型已开始输出 · 23s · 已接收 XX 字符」；**不参与**任何业务判定。
@@ -136,8 +153,8 @@ export interface OrchestrateOpts {
 
 /** 引用校验结果 */
 export interface CitationAudit {
-  /** 模型引用但样本里不存在的 rpid */
-  unknownRpids: string[];
+  /** 模型引用了但样本里不存在的匿名 ref（可能是臆造） */
+  unknownRefs: string[];
   /** 有多少条论断完全没有引用 */
   claimsWithoutCitation: number;
   /** 引用总条数 */
@@ -191,29 +208,31 @@ export type OrchestrateResult = OrchestrateSuccess | OrchestrateFailure;
 // ─────────────────────────────────────────────────────────── 引用校验
 
 /**
- * 校验 support/opposition/themes/findings 的 rpid 引用是否真实存在于样本中。
- * 这是「可验证」的核心：模型说「很多用户支持 X」，必须能指回真实评论。
+ * 校验 support/opposition/themes/findings 的匿名引用（refs/evidenceRefs）是否真实存在于样本中。
+ * 这是「可验证」的核心：模型说「很多用户支持 X」，必须能指回样本内的真实评论（经 citationMap 回溯）。
+ *
+ * V3.1.0 · P0-AI 隐私化：模型只见过 C001 类匿名 ref，因此白名单也必须是 ref（knownRefs）。
  */
-export function auditCitations(data: CommentAIResult, knownRpids: string[] | undefined): CitationAudit {
-  const known = knownRpids && knownRpids.length ? new Set(knownRpids) : null;
+export function auditCitations(data: CommentAIResult, knownRefs: string[] | undefined): CitationAudit {
+  const known = knownRefs && knownRefs.length ? new Set(knownRefs) : null;
   const unknown = new Set<string>();
   let total = 0;
 
-  const scan = (rpids: string[] | undefined): void => {
-    for (const r of rpids ?? []) {
+  const scan = (refs: string[] | undefined): void => {
+    for (const r of refs ?? []) {
       total++;
       if (known && !known.has(r)) unknown.add(r);
     }
   };
 
-  for (const c of data.support) scan(c.rpid);
-  for (const c of data.opposition) scan(c.rpid);
-  for (const t of data.themes) scan(t.rpids);
-  for (const f of data.findings) scan(f.evidenceRpids);
+  for (const c of data.support) scan(c.refs);
+  for (const c of data.opposition) scan(c.refs);
+  for (const t of data.themes) scan(t.refs);
+  for (const f of data.findings) scan(f.evidenceRefs);
 
-  const claimsWithoutCitation = [...data.support, ...data.opposition].filter((c) => c.rpid.length === 0).length;
+  const claimsWithoutCitation = [...data.support, ...data.opposition].filter((c) => c.refs.length === 0).length;
 
-  return { unknownRpids: [...unknown], claimsWithoutCitation, totalCitations: total };
+  return { unknownRefs: [...unknown], claimsWithoutCitation, totalCitations: total };
 }
 
 // ─────────────────────────────────────────────────────────── 领域投影
@@ -225,6 +244,12 @@ export function auditCitations(data: CommentAIResult, knownRpids: string[] | und
  * `AIAnalysis = 审计`（保留完整 prompt/raw/token/finishReason）
  * `CommentAnalysis = 产品结果`（用户真正看到的）
  *
+ * V3.1.0 · P0-AI 隐私化：
+ *   - AI 结构内部保持**匿名 ref** 语义（analysisResult 原样落库）；
+ *   - `citationMap`（ref → 真实 rpidStr）随产品结果落库，供 UI 回溯定位；
+ *   - `citedCommentRpids` 汇总的是**真实 rpid**（本地审计口径，不外发）；
+ *   - 渲染文本把 `[rpid: X]` 改为 `[引用 C001, C003]`（用户在样本列表能对上的标签）。
+ *
  * ⚠️ V3.0.1 · P0-2 语义修正（两个字段分工必须清楚）：
  *   - `rawResponse`    = **Provider 原始响应**（`AnalyzeResponse.raw`，形如 `{choices:[...]}`）→ 仅审计/排错
  *   - `analysisResult` = **通过 Zod 校验的结构化业务结果**（`CommentAIResult`）→ UI 唯一可消费来源
@@ -233,23 +258,27 @@ export function auditCitations(data: CommentAIResult, knownRpids: string[] | und
  */
 export function mapToCommentAnalysis(
   result: CommentAIResult,
-  meta: { videoId: string; model: string; raw?: unknown },
+  meta: { videoId: string; model: string; raw?: unknown; citationMap?: Record<string, string> },
 ): CommentAnalysis {
   // 情绪分布：模型没给结构化情绪计数，就不编造 —— 统一 0 并在 uncertainty 里说明。
   // （V3.0 禁止 unknown → 0 伪装；这里 0 的含义是「未提供结构化情绪计数」，已写入 uncertainty。）
   const sentiment = { positive: 0, neutral: 0, negative: 0 };
 
   const themeResult = result.themes.map((t) => {
-    const cite = t.rpids.length ? `（引用 ${t.rpids.length} 条评论）` : '';
+    const cite = t.refs.length ? `（引用 ${t.refs.length} 条评论）` : '';
     return `${t.name}${cite}`;
   });
 
-  // 支持/反对：把 CitedClaim 渲染为「观点 + 引用」，同时汇总引用 rpid
+  // 支持/反对：把 CitedClaim 渲染为「观点 + 引用」，同时把 ref 回溯为真实 rpid 汇总
   const cited = new Set<string>();
   const renderClaims = (claims: typeof result.support): string[] =>
     claims.map((c) => {
-      for (const r of c.rpid) cited.add(r);
-      return c.rpid.length ? `${c.statement} [rpid: ${c.rpid.join(', ')}]` : `${c.statement} [无引用]`;
+      for (const ref of c.refs) {
+        const real = meta.citationMap?.[ref];
+        if (real) cited.add(real);
+      }
+      const shown = c.refs.map((ref) => meta.citationMap?.[ref] ?? ref);
+      return c.refs.length ? `${c.statement} [引用 ${shown.join(', ')}]` : `${c.statement} [无引用]`;
     });
 
   const supportResult = renderClaims(result.support);
@@ -280,8 +309,10 @@ export function mapToCommentAnalysis(
     // ── V3.0.1 · P0-2：两个字段语义分离 ──
     // Provider 原始响应：仅供审计/排错，**不是**业务结果
     rawResponse: meta.raw,
-    // 通过 Zod 校验的结构化业务结果：UI 唯一可消费来源
+    // 通过 Zod 校验的结构化业务结果：UI 唯一可消费来源（内部保持匿名 ref 语义）
     analysisResult: result,
+    // V3.1.0 · P0-AI 隐私化：ref → 真实 rpid 的本地映射（随产品结果落库）
+    citationMap: meta.citationMap ?? {},
   };
 }
 
@@ -380,6 +411,11 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
   // 流式请求本就没有总时长限制。`single` 策略保留 V3.0.1 的总超时兜底。
   const noTotalTimeout = strategy === 'probe_guarded' || openTestMode ? true : undefined;
 
+  // V3.1.0 · P0-AI 时长放宽：Test Mode 是**全局硬开关**——一切人为时长限制都关闭，
+  // 空闲超时同样强制「不限制」（null），不依赖 UI 记得传参。
+  // 非 Test Mode 时透传 UI 选择（undefined=默认 300s / number=指定 / null=不限制）。
+  const idleTimeoutMs = openTestMode ? null : opts.idleTimeoutMs;
+
   // Main 的中止通道：用户取消（opts.signal）与 probe_guarded 看门联动都汇入这里。
   const mainAbort = new AbortController();
   const unlinkUserFromMain = linkExternalSignal(opts.signal, mainAbort);
@@ -399,6 +435,9 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
     // V3.0.1 · P0-A：流式开关与进度回调（透传到 adapter）
     stream: opts.stream,
     onProgress: opts.onProgress,
+    // V3.1.0 · P0-AI 时长放宽：流式空闲超时（undefined=默认 300s / number=指定 / null=不限制；
+    // Test Mode 下已归一为 null）
+    idleTimeoutMs,
     // V3.0.2：请求语义类型 / 外部中止 / 人为总时长开关
     requestType: 'analysis',
     signal: mainAbort.signal,
@@ -706,6 +745,8 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
           // 修复请求沿用同一流式策略与进度回调，避免「修复一次就退化成硬超时」
           stream: opts.stream,
           onProgress: opts.onProgress,
+          // V3.1.0：修复请求沿用 Main 的空闲超时语义（Test Mode 下已归一为 null）
+          idleTimeoutMs,
           // V3.0.2：修复请求沿用 Main 的中止通道与总时长语义
           // （probe_guarded / Test Mode 下同样无人为总时长限制）
           requestType: 'analysis',
@@ -759,9 +800,9 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
     };
   }
 
-  // ── 6. 引用审计（可验证性核心） ──
+  // ── 6. 引用审计（可验证性核心；白名单 = 匿名 ref） ──
   const data = validation.data as CommentAIResult;
-  const citations = auditCitations(data, opts.knownRpids);
+  const citations = auditCitations(data, opts.knownRefs);
 
   // ── 7. 落领域结果（仅 SUCCESS；非评论领域跳过） ──
   let domainRecordId: string | null = null;
@@ -770,6 +811,7 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       videoId: opts.targetId,
       model: preCfg.model,
       raw: usedResponse.raw,
+      citationMap: opts.citationMap,
     });
     await commentAnalysisRepo.add(domainRecord);
     domainRecordId = domainRecord.id;
@@ -844,9 +886,14 @@ export async function orchestrateCommentAnalysis(opts: {
   systemPrompt: string;
   userPrompt: string;
   factsJson?: string;
-  knownRpids: string[];
+  /** V3.1.0：匿名 ref 白名单（C001 样式，来自 prepare 层 sample） */
+  knownRefs: string[];
+  /** V3.1.0：ref → 真实 rpidStr 本地映射（随产品结果落库；不发送 Provider） */
+  citationMap: Record<string, string>;
   provider?: ProviderName;
   maxTokens?: number;
+  /** V3.1.0：流式空闲超时（undefined=默认 300s / number=指定 / null=不限制） */
+  idleTimeoutMs?: number | null;
   /** V3.0.1 · P0-A：流式进度回调（UI 显示「已接收 XX 字符」） */
   onProgress?: (info: StreamProgress) => void;
   /** V3.0.1 · P0-A：是否强制流式（不传则按 provider 能力） */
@@ -864,9 +911,11 @@ export async function orchestrateCommentAnalysis(opts: {
     systemPrompt: opts.systemPrompt,
     userPrompt: opts.userPrompt,
     factsJson: opts.factsJson,
-    knownRpids: opts.knownRpids,
+    knownRefs: opts.knownRefs,
+    citationMap: opts.citationMap,
     provider: opts.provider,
     maxTokens: opts.maxTokens,
+    idleTimeoutMs: opts.idleTimeoutMs,
     onProgress: opts.onProgress,
     stream: opts.stream,
     requestStrategy: opts.requestStrategy,
