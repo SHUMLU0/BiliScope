@@ -53,6 +53,15 @@ export function CommentPage() {
   const [sampleStrategy, setSampleStrategy] = useState<CommentSampleStrategy>('hot');
   // V3.0.1 · P0-1/P1-5：AI 样本上限（默认 120；输入过大时优先在这里降，而不是让请求失败）
   const [aiSampleLimit, setAiSampleLimit] = useState(DEFAULT_SAMPLE_LIMIT);
+  // ── V3.0.2：AI 开放测试模式 ──
+  // 输出上限：'auto' = 请求体**不带** max_tokens（上限交给 Provider 决定）；
+  // 数字 = 显式指定；'custom' = 用户自定义输入。
+  const [aiOutputLimit, setAiOutputLimit] = useState<'auto' | 'custom' | number>('auto');
+  const [aiOutputLimitCustom, setAiOutputLimitCustom] = useState(8192);
+  // AI Test Mode：关闭 BiliScope 一切人为 token/总时长限制（Provider 自身限制仍生效）
+  const [aiTestMode, setAiTestMode] = useState(false);
+  // 用户取消通道（同时终止 Probe 与 Main）
+  const aiAbort = useRef<AbortController | null>(null);
 
   // ── V3.0：AI 分析状态（强类型，不再是裸字符串） ──
   const [aiBusy, setAiBusy] = useState(false);
@@ -189,6 +198,7 @@ export function CommentPage() {
   /**
    * V3.0 · 第五节：不再手工拼 JSON。
    * 全流程交给 orchestrator：构造 prompt → 请求 → Zod 校验 → 自动修复 → 落库。
+   * V3.0.2：probe_guarded 编排 —— Probe 与 Main 并行，真实阶段提示，用户可取消。
    */
   const handleAI = async (): Promise<void> => {
     const video = await videoRepo.findByBvid(bvid);
@@ -206,6 +216,9 @@ export function CommentPage() {
     setAiStream(null);
     aiT0.current = performance.now();
     setAiElapsed(0);
+    // V3.0.2：本次分析的中止通道（用户取消 → 同时终止 Probe 与 Main）
+    const ctrl = new AbortController();
+    aiAbort.current = ctrl;
     try {
       // V3.0.1 · P0-1：受控样本（唯一采样入口）
       const prep = prepareCommentAnalysis(comments, { sampleStrategy, sampleLimit: aiSampleLimit });
@@ -223,7 +236,7 @@ export function CommentPage() {
         `AI 分析中 · 统计基数 ${prep.total} 条 · AI 样本 ${prep.sample.length} 条（${SAMPLE_STRATEGY_LABEL[prep.sampleStrategy]}）· 约 ${Math.round(prep.budget.totalChars / 1000)}k 字符`,
       );
 
-      setAiStage('请求模型…');
+      setAiStage('启动 Provider 探针…');
       const r = await orchestrateCommentAnalysis({
         videoId: video.id,
         systemPrompt: system,
@@ -236,10 +249,28 @@ export function CommentPage() {
         // 只更新展示，不参与任何业务判定；收到首个有效 chunk 后才切到「已开始输出」。
         onProgress: (info) => {
           setAiStream(info);
-          if (info.phase === 'streaming') {
+          // V3.0.2：真实阶段推进 —— Probe → Main，不显示虚假百分比
+          if (info.phase === 'probe_pending') {
+            setAiStage('启动 Provider 探针…');
+          } else if (info.phase === 'probe_ready') {
+            setAiStage('Probe 已响应 · 开始等待完整分析…');
+          } else if (info.phase === 'probe_failed') {
+            setAiStage('探针异常…');
+          } else if (info.phase === 'streaming') {
             setAiStage('模型已开始输出…');
           }
         },
+        // V3.0.2：输出上限（Auto = 请求体不带 max_tokens；显式数字才发送）
+        maxTokens:
+          aiOutputLimit === 'auto'
+            ? undefined
+            : aiOutputLimit === 'custom'
+              ? aiOutputLimitCustom
+              : aiOutputLimit,
+        // V3.0.2：AI Test Mode（关闭 BiliScope 人为 token/总时长限制）
+        testMode: aiTestMode,
+        // V3.0.2：用户取消信号（同时终止 Probe 与 Main）
+        signal: ctrl.signal,
       });
 
       setAiStage('校验结果…');
@@ -290,7 +321,9 @@ export function CommentPage() {
       });
       setStatusLevel('info');
       setStatus(
-        `AI 完成 · ${r.durationMs}ms · ${r.requestCount} 次请求${r.repaired ? '（含 1 次自动修复）' : ''} · Provider ${r.usedConfig.name}/${r.usedConfig.model}`,
+        `AI 完成 · ${r.durationMs}ms · ${r.requestCount} 次请求${r.repaired ? '（含 1 次自动修复）' : ''} · Provider ${r.usedConfig.name}/${r.usedConfig.model}` +
+          // V3.0.2：Probe 耗时分区显示（probe_guarded 下存在）
+          (r.probe && r.probe.ok ? ` · Probe ${(r.probe.latencyMs / 1000).toFixed(1)}s` : ''),
       );
       await refresh();
     } catch (e) {
@@ -301,13 +334,18 @@ export function CommentPage() {
       setAiStage('');
       setAiStream(null);
       setAiBusy(false);
+      aiAbort.current = null;
     }
   };
 
   const handleLoadHistory = async (): Promise<void> => {
     const video = await videoRepo.findByBvid(bvid);
     if (!video) return;
-    const rows = await aiAnalysisRepo.listByTarget(video.id, 'comment');
+    // V3.0.2：过滤 probe_guarded 探针行（requestType='probe'）—— Probe 是独立审计分区，
+    // 不属于分析历史，也不计入分析 token 成本。
+    const rows = (await aiAnalysisRepo.listByTarget(video.id, 'comment')).filter(
+      (a) => a.requestType !== 'probe',
+    );
     setHistory([...rows].reverse());
     setShowHistory(true);
   };
@@ -433,7 +471,49 @@ export function CommentPage() {
               ))}
             </select>
           </label>
+          {/* V3.0.2：输出上限 —— Auto = 请求体不带 max_tokens，上限交给 Provider 决定 */}
+          <label className="faint">
+            输出上限
+            <select
+              value={String(aiOutputLimit)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setAiOutputLimit(v === 'auto' ? 'auto' : v === 'custom' ? 'custom' : Number(v));
+              }}
+            >
+              <option value="auto">Auto（交给 Provider）</option>
+              <option value="4096">4096</option>
+              <option value="8192">8192</option>
+              <option value="16384">16384</option>
+              <option value="32768">32768</option>
+              <option value="custom">自定义…</option>
+            </select>
+          </label>
+          {aiOutputLimit === 'custom' && (
+            <label className="faint">
+              自定义上限
+              <input
+                type="number"
+                min={256}
+                step={256}
+                value={aiOutputLimitCustom}
+                onChange={(e) => setAiOutputLimitCustom(Math.max(256, Number(e.target.value) || 256))}
+                style={{ width: 110 }}
+              />
+            </label>
+          )}
+          {/* V3.0.2：AI Test Mode —— 关闭 BiliScope 一切人为 token/总时长限制 */}
+          <label className="faint">
+            <input type="checkbox" checked={aiTestMode} onChange={(e) => setAiTestMode(e.target.checked)} />
+            AI Test Mode
+          </label>
         </div>
+        {aiTestMode && (
+          <div className="warn">
+            AI Test Mode 已开启（开放测试模式）：BiliScope 不再对请求施加人为 token / 总时长限制。
+            这不代表模型本身拥有无限上下文或无限输出 —— Provider 自身限制仍然生效。
+          </div>
+        )}
         <div className="faint">
           统计基于**全部已采集评论**（{formatInt(comments.length)} 条）；AI 只分析受控代表性样本（
           {formatInt(samplePreview.budget.sampleCount)} 条 · {SAMPLE_STRATEGY_LABEL[sampleStrategy]} ·
@@ -457,33 +537,52 @@ export function CommentPage() {
         <section className="card stack">
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
             <h3 style={{ margin: 0 }}>AI 分析状态</h3>
-            <span className="faint mono">{aiElapsed}s</span>
+            <span className="row">
+              <span className="faint mono">{aiElapsed}s</span>
+              {/* V3.0.2：用户取消 —— 同时终止 Probe 与 Main */}
+              <button onClick={() => aiAbort.current?.abort()}>取消分析</button>
+            </span>
           </div>
           {/* 真实阶段，不编造百分比 */}
           <div className="row wrap">
-            {['准备数据…', '构造分析上下文…', '请求模型…', '模型已开始输出…', '校验结果…', '保存分析…'].map((s) => (
+            {[
+              '准备数据…',
+              '构造分析上下文…',
+              '启动 Provider 探针…',
+              'Probe 已响应 · 开始等待完整分析…',
+              '模型已开始输出…',
+              '校验结果…',
+              '保存分析…',
+            ].map((s) => (
               <span key={s} className={s === aiStage ? 'tag warn' : 'tag'}>
                 {s}
               </span>
             ))}
           </div>
+          {/* V3.0.2：Probe / Analysis 耗时分区显示（真实数字，不编造） */}
+          {aiStream?.probeLatencyMs !== undefined && (
+            <div className="faint mono">
+              Probe {(aiStream.probeLatencyMs / 1000).toFixed(1)}s · Analysis {aiElapsed}s
+            </div>
+          )}
           {/* V3.0.1 · P0-A：流式实时进度（只有真实字符数与真实秒数，没有假百分比） */}
           {aiStream && aiStream.phase === 'streaming' ? (
             <div className="faint">
-              模型已开始输出 · {Math.round(aiStream.elapsedMs / 1000)}s · 已接收{' '}
-              {formatInt(aiStream.receivedChars)} 字符
-              {aiStream.chunkCount > 0 ? `（${formatInt(aiStream.chunkCount)} 个 chunk）` : ''}
+              模型输出中 · {Math.round((aiStream.elapsedMs ?? 0) / 1000)}s · 已接收{' '}
+              {formatInt(aiStream.receivedChars ?? 0)} 字符
+              {aiStream.chunkCount ? `（${formatInt(aiStream.chunkCount)} 个 chunk）` : ''}
             </div>
           ) : aiElapsed >= 30 ? (
-            /* 首字节等待超过 30s：只提示「模型尚未返回首个响应」，**不终止请求** */
+            /* 首字节等待超过 30s：只提示「模型尚未返回首个响应」，**不终止请求**
+               V3.0.2：probe_guarded 下 Probe healthy 后没有任何人为总时长限制 —— 这里只是提示，绝不 Abort */
             <div className="warn">模型尚未返回首个响应（已等待 {aiElapsed}s，仍在等待）…</div>
           ) : aiElapsed >= 10 ? (
             <div className="faint">模型响应较慢（{aiElapsed}s）…</div>
           ) : null}
           {/* 流式已建立但当前静默 → 提示「仍在输出」而非误判卡死 */}
-          {aiStream && aiStream.phase === 'streaming' && aiStream.sinceLastChunkMs >= 15_000 && (
+          {aiStream && aiStream.phase === 'streaming' && (aiStream.sinceLastChunkMs ?? 0) >= 15_000 && (
             <div className="faint">
-              模型仍在输出…（距上次新数据 {Math.round(aiStream.sinceLastChunkMs / 1000)}s）
+              模型仍在输出…（距上次新数据 {Math.round((aiStream.sinceLastChunkMs ?? 0) / 1000)}s）
             </div>
           )}
           {aiBudget && (

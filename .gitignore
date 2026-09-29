@@ -38,6 +38,8 @@ Thumbs.db
 tmp/
 .cache/
 *.tmp
+.tmp-*
+.git-commit-msg.txt
 
 # 工作区
 .workbuddy/memory/

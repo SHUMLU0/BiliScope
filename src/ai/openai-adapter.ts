@@ -23,6 +23,7 @@
  */
 
 import { logger } from '@utils/logger';
+import { linkExternalSignal } from './probe';
 import {
   FALLBACK_TIMEOUT_MS,
   STREAM_FIRST_BYTE_TIMEOUT_MS,
@@ -67,6 +68,14 @@ interface ChatStreamChunk {
 export const DEFAULT_MAX_TOKENS = 2048;
 
 /**
+ * V3.0.2：Auto 模式的兜底上限。
+ *
+ * **只在** Provider 明确声明 `requiresMaxTokens=true`（不接受省略 `max_tokens`）时使用。
+ * 绝不作为默认值下发 —— BiliScope 默认不主动限制模型的输出能力。
+ */
+export const AUTO_FALLBACK_MAX_TOKENS = 8192;
+
+/**
  * V3.0.1 · P0-A：非流式 fallback 的默认超时（120s）。
  * 保留旧导出名 `DEFAULT_TIMEOUT_MS` 以免破坏既有 import
  * （gemini-adapter / orchestrator / 测试都从这里取）。
@@ -94,9 +103,25 @@ export class OpenAICompatibleAdapter implements AIProvider {
     };
   }
 
-  /** 三级优先级解析本次请求应有的 max_tokens */
-  private resolveMaxTokens(req: AnalyzeRequest): number {
-    return req.maxTokens ?? this.cfg.maxTokens ?? DEFAULT_MAX_TOKENS;
+  /**
+   * 解析本次请求应有的 max_tokens。
+   *
+   * V3.0.2 三级优先级（**Auto 优先**）：
+   *   `request.maxTokens` → `provider.maxTokens` → **Auto（undefined，省略参数）**
+   *
+   * 仅当 Provider 明确 `requiresMaxTokens=true` 时，才在 Auto 情况下回退到
+   * `fallbackMaxTokens` / `AUTO_FALLBACK_MAX_TOKENS`。**绝不默认伪造低上限**。
+   */
+  private resolveMaxTokens(req: AnalyzeRequest): number | undefined {
+    const explicit = req.maxTokens ?? this.cfg.maxTokens;
+    if (explicit !== undefined && explicit !== null && Number.isFinite(explicit)) {
+      return Math.max(1, Math.floor(explicit));
+    }
+    // Auto：只有 Provider 明确不接受省略时才补一个值
+    if (this.cfg.requiresMaxTokens === true) {
+      return this.cfg.fallbackMaxTokens ?? AUTO_FALLBACK_MAX_TOKENS;
+    }
+    return undefined;
   }
 
   /**
@@ -141,7 +166,7 @@ export class OpenAICompatibleAdapter implements AIProvider {
 
   private buildBody(
     req: AnalyzeRequest,
-    usedMaxTokens: number,
+    usedMaxTokens: number | undefined,
     rf: Record<string, unknown> | null,
     stream: boolean,
   ): Record<string, unknown> {
@@ -151,8 +176,10 @@ export class OpenAICompatibleAdapter implements AIProvider {
         { role: 'system', content: req.systemPrompt },
         { role: 'user', content: req.userPrompt },
       ],
+      // V3.0.2：Auto（undefined）时**不下发** max_tokens，由 Provider 自身上限决定。
+      // 这是「删除人为 4096 上限」的核心落点。
+      ...(usedMaxTokens !== undefined ? { max_tokens: usedMaxTokens } : {}),
       temperature: req.temperature ?? 0.2,
-      max_tokens: usedMaxTokens,
       ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
       ...(rf ? { response_format: rf } : {}),
     };
@@ -166,10 +193,12 @@ export class OpenAICompatibleAdapter implements AIProvider {
    */
   private async sendStreaming(
     req: AnalyzeRequest,
-    usedMaxTokens: number,
+    usedMaxTokens: number | undefined,
     rf: Record<string, unknown> | null,
   ): Promise<{ data: ChatResp; stream: StreamMeta }> {
     const ctrl = new AbortController();
+    // V3.0.2：外部中止（用户取消 / probe_guarded 联动 Abort Main）优先于内部看门狗
+    const unlink = linkExternalSignal(req.signal, ctrl);
     const startedAt = performance.now();
     let lastChunkAt = 0;
     let firstByteAt = 0;
@@ -206,7 +235,11 @@ export class OpenAICompatibleAdapter implements AIProvider {
       signal: ctrl.signal,
     }).catch((e: unknown) => {
       clearInterval(watchdog);
-      if (timedOut || isAbortError(e)) {
+      unlink();
+      // V3.0.2：只有**空闲看门狗**触发的中止才改写为 idle-timeout；
+      // 外部中止（用户取消 / probe 联动）必须原样上抛，让上层如实分类，
+      // 绝不把「被取消」伪装成「超时」。
+      if (timedOut) {
         throw new Error(
           `stream idle timeout: 连续 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} 秒没有收到任何新响应`,
         );
@@ -216,11 +249,13 @@ export class OpenAICompatibleAdapter implements AIProvider {
 
     if (!res.ok) {
       clearInterval(watchdog);
+      unlink();
       const txt = await res.text().catch(() => '');
       throw new Error(`HTTP ${res.status}: ${txt.slice(0, 300)}`);
     }
     if (!res.body) {
       clearInterval(watchdog);
+      unlink();
       throw new Error('stream response has no body');
     }
 
@@ -291,6 +326,7 @@ export class OpenAICompatibleAdapter implements AIProvider {
       );
     } finally {
       clearInterval(watchdog);
+      unlink();
     }
 
     if (timedOut) {
@@ -313,15 +349,22 @@ export class OpenAICompatibleAdapter implements AIProvider {
     };
   }
 
-  /** 非流式请求（fallback）：默认超时 120s */
+  /**
+   * 非流式请求（fallback）。
+   *
+   * V3.0.2：`req.noTotalTimeout = true`（probe_guarded healthy / AI Test Mode）时
+   * **不设** BiliScope 人为的总时长 timer —— 请求只由 Provider 完成 / 明确错误 /
+   * 真实断连 / 外部中止来结束。默认策略（single）仍保留 120s 兜底。
+   */
   private async sendOnce(
     req: AnalyzeRequest,
-    usedMaxTokens: number,
+    usedMaxTokens: number | undefined,
     rf: Record<string, unknown> | null,
     timeoutMs: number,
   ): Promise<ChatResp> {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const unlink = linkExternalSignal(req.signal, ctrl);
+    const t = req.noTotalTimeout ? null : setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       const res = await fetch(this.endpoint(), {
         method: 'POST',
@@ -336,7 +379,8 @@ export class OpenAICompatibleAdapter implements AIProvider {
       }
       return (await res.json()) as ChatResp;
     } finally {
-      clearTimeout(t);
+      if (t !== null) clearTimeout(t);
+      unlink();
     }
   }
 
@@ -472,13 +516,6 @@ interface StreamMeta {
   lastChunkAt: number;
   chunkCount: number;
   receivedChars: number;
-}
-
-/** 判断异常是否为 AbortError（DOMException / Error 两种形态） */
-function isAbortError(e: unknown): boolean {
-  if (!e || typeof e !== 'object') return false;
-  const name = (e as { name?: string }).name;
-  return name === 'AbortError';
 }
 
 export { STREAM_FIRST_BYTE_TIMEOUT_MS, STREAM_IDLE_TIMEOUT_MS };

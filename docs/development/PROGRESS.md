@@ -1,7 +1,29 @@
-# BiliScope V3.0.1 进度表
+# BiliScope V3.0.2 进度表
 
 > 唯一进度表（Single Source of Truth）。
 > 状态：✅ 完成 / 🔄 进行中 / ⏸ 阻塞 / ⬜ 未开始
+
+---
+
+## V3.0.2 「AI 开放测试模式」
+
+> 定位：解除 BiliScope 自我施加的 AI 请求/输出限制，只保留 Provider 自身限制。
+> **AI Test Mode 明示：不代表模型拥有无限上下文或无限输出。**
+> 不重写采集层 / CommentCollector / WBI / Dexie，不删历史数据与历史审计。
+
+| 编号 | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **L-1** | 删除人为输出上限 | ✅ | 删除 `TASK_DEFAULT_MAX_TOKENS`（含 comment=4096 硬编码）；默认 **Auto** = 请求体**省略** `max_tokens`/`maxOutputTokens`；仅 `requiresMaxTokens===true` 时回退 `fallbackMaxTokens ?? AUTO_FALLBACK_MAX_TOKENS(8192)`；`AI-LIMIT-001/002/003` |
+| **L-2** | UI 输出上限选项 | ✅ | `Auto / 4096 / 8192 / 16384 / 32768 / 自定义`，默认 Auto；Test Mode 开关 + 警示文案 |
+| **L-3** | `probe_guarded` 策略 | ✅ | Probe（max_tokens=32 / 非流式 / 非评论数据）与 Main **并行启动**；看门 30s → `REQUEST_PROBE_TIMEOUT`；healthy → 取消一切人为总时长限制；Main 只由 Provider 完成 / MAX_TOKENS / 断连 / 用户取消结束；`AI-PROBE-001..004` |
+| **L-4** | 探针失败与取消 | ✅ | 探针 401/429/5xx/空响应 → 独立分类（前缀「探针失败：」）；用户取消 → 如实报告「已取消」；`AI-PROBE-005/007` |
+| **L-5** | 探针审计分区 | ✅ | `requestType='probe'|'analysis'`；探针 token 不计入分析成本；Main 审计回写携带 `meta.probe` 概要（按 id `get`+`put`，修复 `slice(-1)` 命中探针行 + `add` 主键冲突被吞）；`AI-PROBE-006` |
+| **L-6** | UI 真实阶段状态 | ✅ | `启动 Provider 探针…` → `Probe 已响应 · 开始等待完整分析…` → `模型输出中 · 47s · 已接收 9.2k 字符`；无假百分比；完成显示 `Probe 0.8s · Analysis 37.2s`；分析可取消 |
+| **L-7** | 失败码 `OUTPUT_LIMIT_PROVIDER` | ✅ | 输出超限独立分类，优先级在 context-too-large 之前；Auto 模式 `OUTPUT_TRUNCATED` 文案不再提示 BiliScope timeout；`AI-LIMIT-004` |
+| **L-8** | 样本放宽至 200 | ✅ | select `[60,80,120,160,200]`；统计与抽样分区不变量不变 |
+| **A** | verify-acceptance 修正 | ✅ | TEST 008：Auto 下断言请求体省略 `max_tokens`、审计 `probe+analysis=2`；TEST 009：请求计数排除探针 |
+| **V** | 版本对齐 | ✅ | `3.0.1 → 3.0.2`（package.json / manifest.json / CHANGELOG / DEPLOYMENT / FINAL_AUDIT / PROGRESS 六处）+ README 新增「Probe 守护与开放测试模式」章节 |
+| **G** | 门禁链 | 🔄 | typecheck / lint / test / build / test:dist / scan-secrets / verify-acceptance → commit → push → CI → tag `v3.0.2` + Release → audit ZIP |
 
 ---
 

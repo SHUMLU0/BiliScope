@@ -2,6 +2,53 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/) 规范。
 
+## [V3.0.2] - 2026-09-29
+
+**AI 开放测试模式**：解除 BiliScope 自我施加的 AI 请求/输出限制 —— 保留 Provider 自身限制，
+移除一切人为输出上限与总时长强杀。**AI Test Mode 明示：不代表模型拥有无限上下文或无限输出。**
+
+### Added
+
+- **`probe_guarded` 请求策略（默认启用）**：分析前先发**极轻探针**（Probe，`max_tokens=32`、
+  非流式、非 JSON、输入不含任何评论数据，返回 `OK` 即可）验证 Provider 可用性；
+  Probe 与 Main **并行启动**（禁止串行等待）。看门 30s 内 Probe 无有效响应 → 同时终止双方，
+  报告专属失败码 `REQUEST_PROBE_TIMEOUT`（UI 文案「Provider 在 30 秒内没有返回探针响应…」）；
+  Probe healthy → **取消 BiliScope 一切人为总时长限制**（30s/60s/120s 强杀绝对禁止），
+  Main 只由 Provider 完成 / `MAX_TOKENS` / 真实断连 / 用户取消结束。
+- **AI Test Mode（设置页开关）**：关闭一切 BiliScope 人为限制，只保留 Provider 自身限制；
+  UI 明示警示文案。
+- **输出上限「Auto」默认**：新增 UI 选项 `Auto / 4096 / 8192 / 16384 / 32768 / 自定义`，默认 **Auto** ——
+  请求体**省略** `max_tokens`（OpenAI 兼容）/ `maxOutputTokens`（Gemini），输出长度完全交由模型
+  自身上限决定；仅当 Provider `requiresMaxTokens===true` 时回退
+  `fallbackMaxTokens ?? 8192`。**禁止任务级硬编码**（V3.0.1 的 comment=4096 已删除）。
+- **失败码 `OUTPUT_LIMIT_PROVIDER`**：Provider 明确拒绝输出上限（如「output tokens exceed…」）时
+  独立分类，优先级在 `REQUEST_CONTEXT_TOO_LARGE` 之前，不再混入 `REQUEST_FAILED` 兜底。
+- **Probe 审计分区**：审计行新增 `requestType = 'probe' | 'analysis'`；Probe 的 token **不计入**
+  分析成本；Main 成功审计回写携带 `meta.probe` 概要（provider/model/latency/success）。
+- **分析可取消**：AI 分析进行中显示「取消分析」按钮，用户中止后 Probe 与 Main 同时终止，
+  如实报告「已取消」（绝不伪装成超时）。
+- **AI 真实阶段状态（无假百分比）**：`启动 Provider 探针…` → `Probe 已响应 · 开始等待完整分析…` →
+  `模型输出中 · 47s · 已接收 9.2k 字符`；完成状态显示 `Probe 0.8s · Analysis 37.2s` 分区耗时。
+
+### Changed
+
+- **评论 AI 分析样本上限放宽**：样本量选择 `[60, 80, 120, 160, 200]`（此前默认 120），
+  统计基数与抽样分区的 V3.0.1 不变量不变 —— 采多少统计多少，抽样只影响 AI 输入。
+- **`OUTPUT_TRUNCATED` Auto 语义**：仅在真实 `finishReason` 表示 token 上限时出现；
+  Auto 模式文案改为「当前输出上限为 Auto：已达到模型自身极限」，不再把 Provider 的
+  `MAX_TOKENS` 说成 BiliScope 超时。
+- **审计回写改为按 id 精确定位（`get` + `put`）**：修复 probe_guarded 下
+  `listByTarget(...).slice(-1)` 可能命中 Probe 行、且 `add` 对已存在主键抛 `ConstraintError`
+  被吞导致回写静默失败的缺陷。
+
+### Tests
+
+新增命名测试：`AI-LIMIT-001..004`（Auto 省略 max_tokens / 显式覆盖 / requiresMaxTokens 回退 /
+真实 MAX_TOKENS → OUTPUT_TRUNCATED Auto 文案）、`AI-PROBE-001..007`（并行启动 / 看门超时 /
+无人为总时长限制 / 探针 401 分类 / 审计分区与 token 隔离 / 用户取消 / single 策略回归）。
+`verify-acceptance` TEST 008/009 同步修正：Auto 下断言请求体省略 `max_tokens`、
+审计行 `probe+analysis=2`，请求计数排除 Probe。
+
 ## [V3.0.1] - 2026-09-28
 
 **维护版**：`V3.0.1 = V3.0 可验证 AI 分析系统的稳定性 / 性能 / UI / 文档维护版`。

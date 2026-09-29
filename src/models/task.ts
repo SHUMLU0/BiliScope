@@ -48,6 +48,8 @@ export const aiAnalysisSchema = z.object({
   targetId: nonEmpty,
   provider: z.enum(['openai-compatible', 'deepseek', 'gemini', 'custom']),
   model: z.string().min(1),
+  // V3.0.2：请求语义分区（probe_guarded 探针行独立记录，不计入分析 token 成本）
+  requestType: z.enum(['analysis', 'probe']).optional(),
   systemPrompt: z.string().max(8000),
   userPrompt: z.string().max(8000),
   rawResponse: z.unknown().optional(),

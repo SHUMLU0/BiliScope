@@ -25,14 +25,14 @@ function localLinks(md: string): string[] {
   return [...new Set(out)];
 }
 
-describe('DOC · README 与版本一致性（V3.0.1 · 第八节）', () => {
+describe('DOC · README 与版本一致性（V3.0.2 · 第八节）', () => {
   it('DOC-001: README no longer presents V0.1/V0.2/V0.3 as the current version', () => {
     const readme = read('README.md');
 
-    // 当前版本必须显式声明为 v3.0.1
-    expect(readme).toMatch(/v3\.0\.1/);
+    // 当前版本必须显式声明为 v3.0.2
+    expect(readme).toMatch(/v3\.0\.2/);
     expect(readme).toMatch(/## 当前版本/);
-    expect(readme).toMatch(/V3\.0\.1 = V3\.0 可验证 AI 分析系统的稳定性 \/ 性能 \/ UI \/ 文档维护版/);
+    expect(readme).toMatch(/V3\.0\.2 = AI 开放测试模式/);
 
     // 「V0.1 = ...」这种把旧版本当作当前定位的写法必须消失
     expect(readme).not.toMatch(/^V0\.1\s*=/m);
@@ -54,7 +54,7 @@ describe('DOC · README 与版本一致性（V3.0.1 · 第八节）', () => {
       '## AI 配置',
       '## 数据与隐私',
       '## 已知限制',
-      '## V3.0 → V3.0.1',
+      '## V3.0 → V3.0.2',
       '## Project Structure',
       '## License',
     ]) {
@@ -139,22 +139,25 @@ describe('DOC · 仓库文档结构（V3.0.1 · 第十节）', () => {
   });
 });
 
-describe('DOC · CHANGELOG 与版本号一致（V3.0.1 · 第十二节）', () => {
-  it('CHANGELOG 含 [V3.0.1] - 2026-09-28 段落及其 Fixed / Improved 明细', () => {
+describe('DOC · CHANGELOG 与版本号一致（V3.0.2 · 第十二节）', () => {
+  it('CHANGELOG 含 [V3.0.2] - 2026-09-29 段落及其 Added / Changed 明细（V3.0.1 历史段落保留）', () => {
     const changelog = read('CHANGELOG.md');
+    expect(changelog).toMatch(/\[V3\.0\.2\] - 2026-09-29/);
+    // V3.0.2 条目必须覆盖本轮真实变更
+    expect(changelog).toMatch(/probe_guarded/);
+    expect(changelog).toMatch(/Auto/);
+    expect(changelog).toMatch(/OUTPUT_LIMIT_PROVIDER/);
+    expect(changelog).toMatch(/AI Test Mode/);
+    // 历史段落不得删除
     expect(changelog).toMatch(/\[V3\.0\.1\] - 2026-09-28/);
-    // Fixed 条目必须覆盖本轮真实修复
     expect(changelog).toMatch(/200 条原始评论|slice\(0, ?200\)/);
     expect(changelog).toMatch(/CommentAnalysis/);
-    expect(changelog).toMatch(/refresh/);
-    expect(changelog).toMatch(/REQUEST_FAILED/);
-    expect(changelog).toMatch(/超时/);
   });
 
-  it('版本号三处对齐为 3.0.1（package.json / manifest.json / CHANGELOG）', () => {
+  it('版本号三处对齐为 3.0.2（package.json / manifest.json / CHANGELOG）', () => {
     const pkg = JSON.parse(read('package.json')) as { version: string };
     const manifest = JSON.parse(read('extension/manifest.json')) as { version: string };
-    expect(pkg.version).toBe('3.0.1');
-    expect(manifest.version).toBe('3.0.1');
+    expect(pkg.version).toBe('3.0.2');
+    expect(manifest.version).toBe('3.0.2');
   });
 });

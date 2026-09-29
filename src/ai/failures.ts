@@ -25,6 +25,12 @@ export const AI_FAILURE_CODES = [
   'REQUEST_CONTEXT_TOO_LARGE',
   /** Provider 侧业务错误体（HTTP 200 + error 字段 / 模型不存在等） */
   'REQUEST_PROVIDER_ERROR',
+  /**
+   * V3.0.2：Provider 明确表示**输出**超限（max output tokens exceeded 等）。
+   * 与 REQUEST_CONTEXT_TOO_LARGE（输入过大）严格区分：
+   * 前者是模型输出能力上限，后者是输入上下文窗口超限。
+   */
+  'OUTPUT_LIMIT_PROVIDER',
   /** 兜底：未能归类的请求失败（诊断信息必须非空） */
   'REQUEST_FAILED',
   /** HTTP 200 但模型没有产出任何可用内容（空串 / 只有空白） */
@@ -39,6 +45,11 @@ export const AI_FAILURE_CODES = [
   'OUTPUT_REFUSAL',
   /** 未配置 Provider */
   'NO_PROVIDER',
+  /**
+   * V3.0.2 · probe_guarded：探针 30s 内没有任何有效响应 → 已终止 Probe 与 Main。
+   * 这是 probe_guarded 策略专属的失败码，绝不与普通总时长超时混用。
+   */
+  'REQUEST_PROBE_TIMEOUT',
 ] as const;
 
 export type AIFailureCode = (typeof AI_FAILURE_CODES)[number];
@@ -64,13 +75,19 @@ const MESSAGES: Record<AIFailureCode, string> = {
   REQUEST_RATE_LIMITED: 'Provider 限流（请求过于频繁）',
   REQUEST_CONTEXT_TOO_LARGE: '输入内容过大：请减少 AI 分析样本数量',
   REQUEST_PROVIDER_ERROR: 'Provider 返回错误',
+  OUTPUT_LIMIT_PROVIDER: 'Provider 拒绝输出请求：输出超过模型允许的输出上限',
   REQUEST_FAILED: 'AI 请求失败',
   OUTPUT_EMPTY: 'AI 返回了空内容（接口成功但模型没有输出）',
-  OUTPUT_TRUNCATED: 'AI 输出被截断，请重试或提高输出上限',
+  /**
+   * V3.0.2：只在 Provider **真实返回** MAX_TOKENS / LENGTH 时才出现本码
+   * （BiliScope 自己的超时永远不会被判成截断 —— 那是 REQUEST_TIMEOUT / REQUEST_PROBE_TIMEOUT）。
+   */
+  OUTPUT_TRUNCATED: 'Provider 返回 MAX_TOKENS：当前 Auto/指定输出能力已达到模型限制',
   OUTPUT_INVALID_JSON: 'AI 输出不是合法 JSON（模型未按结构输出）',
   OUTPUT_SCHEMA_INVALID: 'AI 输出不符合分析结果结构（缺少或类型错误的字段）',
   OUTPUT_REFUSAL: 'AI 拒绝回答该请求',
   NO_PROVIDER: '未配置 AI Provider',
+  REQUEST_PROBE_TIMEOUT: 'Provider 在 30 秒内没有返回探针响应，已取消本次 AI 分析',
 };
 
 const RETRYABLE: Record<AIFailureCode, boolean> = {
@@ -80,6 +97,7 @@ const RETRYABLE: Record<AIFailureCode, boolean> = {
   REQUEST_RATE_LIMITED: true,
   REQUEST_CONTEXT_TOO_LARGE: false,
   REQUEST_PROVIDER_ERROR: false,
+  OUTPUT_LIMIT_PROVIDER: false,
   REQUEST_FAILED: true,
   OUTPUT_EMPTY: true,
   OUTPUT_TRUNCATED: true,
@@ -87,6 +105,7 @@ const RETRYABLE: Record<AIFailureCode, boolean> = {
   OUTPUT_SCHEMA_INVALID: true,
   OUTPUT_REFUSAL: false,
   NO_PROVIDER: false,
+  REQUEST_PROBE_TIMEOUT: true,
 };
 
 /** 请求类失败码（由 classifyRequestError 产出） */
@@ -97,6 +116,7 @@ export const REQUEST_FAILURE_CODES = [
   'REQUEST_RATE_LIMITED',
   'REQUEST_CONTEXT_TOO_LARGE',
   'REQUEST_PROVIDER_ERROR',
+  'OUTPUT_LIMIT_PROVIDER',
   'REQUEST_FAILED',
 ] as const satisfies readonly AIFailureCode[];
 
@@ -139,7 +159,23 @@ export function classifyRequestError(e: unknown, timeoutMs?: number): AIFailureI
     };
   }
 
-  // 2. 上下文过大：HTTP 413，或 400 且明确指出 input/context 过大
+  // 2. 输出超限（V3.0.2）：Provider 明确表示「输出」超过模型允许的上限。
+  //    与输入过大（下一判定）严格区分：前者是模型输出能力上限，后者是输入上下文窗口超限。
+  //    规格硬性要求：这类错误绝不允许归类成 REQUEST_FAILED。
+  const outputLimit =
+    /max[_ ]?output[_ ]?tokens|output[_ ]?tokens?.{0,24}(exceed|too (large|long|high)|limit)|output.{0,16}(exceed|too (large|long))|maximum output|output limit|completion[_ ]?tokens.{0,24}(exceed|limit)|max_tokens.{0,48}(too (large|high)|exceed|supports at most)/i.test(
+      msg,
+    );
+  if (outputLimit) {
+    return {
+      code: 'OUTPUT_LIMIT_PROVIDER',
+      message: 'Provider 拒绝输出请求：输出超过模型允许的输出上限（可在设置中调整「输出上限」或更换模型）',
+      retryable: false,
+      detail: msg,
+    };
+  }
+
+  // 3. 上下文过大：HTTP 413，或 400 且明确指出 input/context 过大
   const is413 = /\bhttp\s*413\b/i.test(msg);
   const is400 = /\bhttp\s*400\b/i.test(msg);
   const tooLarge = /context[_ ]length|maximum context|too many tokens|token.{0,10}limit|prompt is too long|input.{0,10}too large|request entity too large/i.test(

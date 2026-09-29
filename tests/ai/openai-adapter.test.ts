@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OpenAICompatibleAdapter, DEFAULT_MAX_TOKENS } from '@ai/openai-adapter';
+import { OpenAICompatibleAdapter, AUTO_FALLBACK_MAX_TOKENS } from '@ai/openai-adapter';
 import type { ProviderConfig } from '@ai/types';
 
 const cfg: ProviderConfig = {
@@ -116,8 +116,8 @@ describe('OpenAICompatibleAdapter · V3.0 诊断字段', () => {
   });
 });
 
-describe('OpenAICompatibleAdapter · max_tokens 三级优先级', () => {
-  it('uses request.maxTokens when provided', async () => {
+describe('OpenAICompatibleAdapter · max_tokens 优先级（V3.0.2 Auto 语义）', () => {
+  it('uses request.maxTokens when provided (AI-LIMIT-002)', async () => {
     const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
     const a = new OpenAICompatibleAdapter({ ...cfg, maxTokens: 512 });
     const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u', maxTokens: 4096 });
@@ -133,13 +133,30 @@ describe('OpenAICompatibleAdapter · max_tokens 三级优先级', () => {
     expect(r.usedMaxTokens).toBe(512);
   });
 
-  it('falls back to task default (NOT hardcoded 1024) when nothing configured', async () => {
+  it('AI-LIMIT-001: Auto = request body OMITS max_tokens entirely (task-default hardcode removed)', async () => {
     const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
     const a = new OpenAICompatibleAdapter(cfg);
     const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u' });
-    expect(cap.body().max_tokens).toBe(DEFAULT_MAX_TOKENS);
-    expect(r.usedMaxTokens).toBe(DEFAULT_MAX_TOKENS);
-    expect(DEFAULT_MAX_TOKENS).not.toBe(1024);
+    // V3.0.2：Auto 时请求体**不携带** max_tokens —— 上限交给 Provider 决定
+    expect(cap.body().max_tokens).toBeUndefined();
+    expect('max_tokens' in cap.body()).toBe(false);
+    expect(r.usedMaxTokens).toBeUndefined();
+  });
+
+  it('AI-LIMIT-003: requiresMaxTokens provider falls back to AUTO_FALLBACK_MAX_TOKENS in Auto mode', async () => {
+    const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
+    const a = new OpenAICompatibleAdapter({ ...cfg, requiresMaxTokens: true });
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u' });
+    expect(cap.body().max_tokens).toBe(AUTO_FALLBACK_MAX_TOKENS);
+    expect(r.usedMaxTokens).toBe(AUTO_FALLBACK_MAX_TOKENS);
+  });
+
+  it('AI-LIMIT-003b: requiresMaxTokens provider honours its own fallbackMaxTokens first', async () => {
+    const cap = captureFetch({ choices: [{ message: { content: '{}' } }] });
+    const a = new OpenAICompatibleAdapter({ ...cfg, requiresMaxTokens: true, fallbackMaxTokens: 6144 });
+    const r = await a.analyze({ systemPrompt: 's', userPrompt: 'u' });
+    expect(cap.body().max_tokens).toBe(6144);
+    expect(r.usedMaxTokens).toBe(6144);
   });
 });
 
@@ -367,7 +384,7 @@ describe('OpenAICompatibleAdapter · V3.0.1 P0-A 流式', () => {
     await a.analyze({
       systemPrompt: 's',
       userPrompt: 'u',
-      onProgress: (p) => seen.push({ phase: p.phase, chars: p.receivedChars }),
+      onProgress: (p) => seen.push({ phase: p.phase, chars: p.receivedChars ?? 0 }),
     });
     expect(seen.length).toBeGreaterThan(0);
     // 至少出现过一次 streaming 阶段（有真实 chunk 到达）

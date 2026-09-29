@@ -15,7 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearAll, db } from '@db/database';
-import { orchestrate, auditCitations, mapToCommentAnalysis, TASK_DEFAULT_MAX_TOKENS } from '@ai/orchestrator';
+import { orchestrate, auditCitations, mapToCommentAnalysis } from '@ai/orchestrator';
 import { getProviderConfig } from '@ai/settings';
 import type { CommentAIResult } from '@ai/schemas';
 
@@ -131,6 +131,9 @@ const BASE_OPTS = {
   systemPrompt: 'sys',
   userPrompt: 'user',
   knownRpids: ['101', '102', '103'],
+  // V3.0.2：本文件的既有用例全部使用 `single` 策略（V3.0.1 旧行为、不发 Probe），
+  // 保证「调用次数 / 请求顺序」断言语义不变。probe_guarded 的专项测试见 probes.test.ts。
+  requestStrategy: 'single' as const,
 };
 
 beforeEach(async () => {
@@ -173,12 +176,22 @@ describe('orchestrate · 成功路径', () => {
     expect(cap.calls()).toBe(2);
   });
 
-  it('honours the comment-domain token default (>=4096, not 1024)', async () => {
+  it('AI-LIMIT-001: orchestrate Auto = request body omits max_tokens (task default hardcode removed)', async () => {
     saveCfg();
-    const cap = mockSequence([{ content: JSON.stringify(GOOD) }]);
-    await orchestrate(BASE_OPTS);
-    expect(cap.calls()).toBe(1);
-    expect(TASK_DEFAULT_MAX_TOKENS.comment).toBeGreaterThanOrEqual(4096);
+    const bodies: Record<string, unknown>[] = [];
+    globalThis.fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+      return new Response(
+        JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(GOOD) } }] }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    const r = await orchestrate(BASE_OPTS);
+    expect(r.ok).toBe(true);
+    // V3.0.2：未显式指定输出上限（且 Provider 未配置 maxTokens）→ Auto：
+    // 请求体**不携带** max_tokens —— 4096 任务级硬编码已废除
+    expect(bodies[0]!.max_tokens).toBeUndefined();
+    expect('max_tokens' in bodies[0]!).toBe(false);
   });
 
   it('uses an explicit maxTokens override', async () => {

@@ -18,6 +18,7 @@ import { OpenAICompatibleAdapter } from './openai-adapter';
 import { GeminiAdapter } from './gemini-adapter';
 import type {
   AIProvider,
+  AIRequestType,
   AnalyzeRequest,
   AnalyzeResponse,
   ProviderConfig,
@@ -75,10 +76,15 @@ export interface AIAnalysisAuditPatch {
   status?: string;
   incomplete?: boolean;
   refusal?: string;
-  /** 本次会话内第几次尝试（1 = 首次，2 = 自动修复） */
+  /** 本次会话内第几次尝试（1 = 首次，2 = 自动修复；0 = probe_guarded 探针） */
   attempt?: number;
   /** 自动修复前后的总请求数 */
   requestCount?: number;
+  /**
+   * V3.0.2：请求语义类型（analysis / probe）。
+   * Probe 是独立审计分区：**不计入**评论分析 token 成本，仅供连通性诊断。
+   */
+  requestType?: AIRequestType;
 }
 
 export interface ServiceAnalyzeResult {
@@ -129,6 +135,8 @@ export async function aiAnalyze(opts: ServiceAnalyzeOpts): Promise<ServiceAnalyz
     targetId: opts.targetId,
     provider: cfg.name,
     model: cfg.model,
+    // V3.0.2：requestType 分区（probe 行独立于 analysis 行，UI 历史列表过滤 probe）
+    requestType: opts.request.requestType ?? 'analysis',
     systemPrompt: opts.request.systemPrompt,
     userPrompt: opts.request.userPrompt,
     rawResponse: response.raw,

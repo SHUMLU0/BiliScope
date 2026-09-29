@@ -13,11 +13,21 @@
  *  3. **自动修复上限 = 2 次总请求**。只对「无效 JSON」与「schema 不符」修复；
  *     `OUTPUT_TRUNCATED` 默认**不修复**（直接告知上限不足）。
  *  4. 只有 SUCCESS 才写正式领域结果（CommentAnalysis）。失败绝不留半成品。
+ *
+ * V3.0.2（AI 开放测试模式）：
+ *  - maxTokens 默认 **Auto**（请求体省略 max_tokens，上限交给 Provider）；
+ *    任务级 4096 硬编码（TASK_DEFAULT_MAX_TOKENS）已废除。
+ *  - 默认策略 `probe_guarded`：Probe（极轻）与 Main **并行**启动；
+ *    Probe 30s 无有效响应 → 终止两者 → REQUEST_PROBE_TIMEOUT；
+ *    Probe healthy → Main **没有任何人为总时长限制**（30s/60s/120s 到期强杀已废除），
+ *    Main 只由 Provider 完成/明确错误/MAX_TOKENS/真实断连/用户取消结束。
+ *  - Probe 是独立审计分区（requestType='probe'），不计入分析 token 成本。
  */
 
 import { newId } from '@utils/id';
 import { nowIso } from '@utils/time';
 import { aiAnalysisRepo, commentAnalysisRepo } from '@repositories/index';
+import { db } from '@db/database';
 import { aiAnalyze, resolveProviderConfig } from './service';
 import { buildAdapter } from './service';
 import { buildRepairPrompt } from './prompts';
@@ -37,8 +47,24 @@ import {
   isTruncatedFinish,
   type AIFailureCode,
 } from './failures';
+import {
+  buildProbeRequest,
+  isHealthyProbeText,
+  linkExternalSignal,
+  skippedProbe,
+  PROBE_TIMEOUT_MS,
+  PROBE_TIMEOUT_MARKER,
+} from './probe';
 import { DEFAULT_TIMEOUT_MS } from './openai-adapter';
-import type { AnalyzeRequest, AnalyzeResponse, ProviderConfig, ProviderName, StreamProgress } from './types';
+import type {
+  AIRequestStrategy,
+  AnalyzeRequest,
+  AnalyzeResponse,
+  ProbeResult,
+  ProviderConfig,
+  ProviderName,
+  StreamProgress,
+} from './types';
 import type { AIAnalysis, CommentAnalysis } from '@models/index';
 
 /**
@@ -55,20 +81,15 @@ type SchemaValidationLike =
   | { ok: true; data: CommentAIResult | GeneralAIResult }
   | { ok: false; error: string; issues: string[] };
 
-// ─────────────────────────────────────────────────────────── 任务默认 token
-
-/**
- * V3.0 · 第四节：按任务类型给默认输出上限。
- * 优先级始终是 request.maxTokens → provider.maxTokens → 这里的任务默认值。
- */
-export const TASK_DEFAULT_MAX_TOKENS: Record<AIDomain, number> = {
-  // 评论分析要输出 summary/facts/findings/themes/support/opposition/needs/questions/uncertainty/nextResearch
-  // 1024 一定不够 —— 这是 V3.0 明确点名的截断根因。
-  comment: 4096,
-  creator: 2048,
-  video: 2048,
-  idea: 2048,
-};
+// ─────────────────────────────────────────────────────────── 输出上限（V3.0.2 Auto 语义）
+//
+// V3.0.2 起**废除任务级默认 max_tokens 硬编码**（V3.0 的 TASK_DEFAULT_MAX_TOKENS =
+// `{ comment: 4096, creator/video/idea: 2048 }` 已删除，规格明令禁止 comment=4096 硬编码）。
+// 现行优先级：
+//   request.maxTokens（UI「输出上限」，默认 Auto）→ provider.maxTokens → **undefined(Auto)**。
+//   Auto 时请求体**省略** `max_tokens` / `maxOutputTokens`，输出上限交给 Provider 决定；
+//   仅 Provider 声明 `requiresMaxTokens` 时才补 `fallbackMaxTokens ?? AUTO_FALLBACK_MAX_TOKENS`。
+//   Auto ≠ 无限：模型自身输出极限仍然生效（MAX_TOKENS finishReason 如实上报为 OUTPUT_TRUNCATED）。
 
 export interface OrchestrateOpts {
   domain: AIDomain;
@@ -77,7 +98,10 @@ export interface OrchestrateOpts {
   userPrompt: string;
   provider?: ProviderName;
   temperature?: number;
-  /** 显式覆盖输出上限 */
+  /**
+   * V3.0.2：显式覆盖输出上限。**不传 = Auto**（请求体省略 max_tokens，上限交给 Provider）。
+   * 任务级 4096 硬编码已废除；Auto ≠ 无限，模型自身极限仍会以 MAX_TOKENS 如实上报。
+   */
   maxTokens?: number;
   /** 外部已算好的事实块（评论领域用它做 facts 一致性检查） */
   factsJson?: string;
@@ -86,6 +110,7 @@ export interface OrchestrateOpts {
   /**
    * V3.0.1 · P0-A：流式进度回调（透传给 adapter）。
    * UI 用它显示「模型已开始输出 · 23s · 已接收 XX 字符」；**不参与**任何业务判定。
+   * V3.0.2 扩展：orchestrator 会推送 `probe_pending / probe_ready / probe_failed` 阶段。
    */
   onProgress?: (info: StreamProgress) => void;
   /**
@@ -93,6 +118,20 @@ export interface OrchestrateOpts {
    * 不传时由 adapter 按 `request.stream → provider.supportsStreaming → fallback` 决定。
    */
   stream?: boolean;
+  /**
+   * V3.0.2：请求策略。
+   * - `probe_guarded`（**默认**）：Probe（极轻）与 Main（完整分析）**并行**启动；
+   *   Probe 30s 无有效响应 → 终止两者 → REQUEST_PROBE_TIMEOUT；
+   *   Probe healthy → Main 无人为总时长限制。
+   * - `single`：V3.0.1 旧行为（不发 Probe，非流式保留总超时兜底）。
+   */
+  requestStrategy?: AIRequestStrategy;
+  /** V3.0.2：AI Test Mode（关闭 BiliScope 一切人为 token/总时长限制；保留 Provider 自身限制） */
+  testMode?: boolean;
+  /** V3.0.2：外部中止信号（用户取消 → 同时终止 Probe 与 Main） */
+  signal?: AbortSignal;
+  /** V3.0.2：探针看门时长（仅测试注入；生产恒为 PROBE_TIMEOUT_MS = 30s） */
+  probeTimeoutMs?: number;
 }
 
 /** 引用校验结果 */
@@ -119,13 +158,15 @@ export interface OrchestrateSuccess {
   citations: CitationAudit;
   /** 是否用过自动修复 */
   repaired: boolean;
-  /** 实际发出的请求总数（1 或 2） */
+  /** 实际发出的请求总数（1 或 2；不含 Probe） */
   requestCount: number;
   /** 落库的产品结果（CommentAnalysis）id；非评论领域为 null */
   domainRecordId: string | null;
   durationMs: number;
   /** 输出是否不完整（截断等）；SUCCESS 且 incomplete=true 时不得视为完整分析 */
   incomplete: boolean;
+  /** V3.0.2：Probe 结果（probe_guarded 时存在；UI 显示「Probe 0.8s · Analysis 37.2s」） */
+  probe?: ProbeResult;
 }
 
 /** 强类型失败结果 */
@@ -141,6 +182,8 @@ export interface OrchestrateFailure {
   rawText: string;
   requestCount: number;
   durationMs: number;
+  /** V3.0.2：Probe 结果（probe_guarded 时存在；REQUEST_PROBE_TIMEOUT 时必有失败详情） */
+  probe?: ProbeResult;
 }
 
 export type OrchestrateResult = OrchestrateSuccess | OrchestrateFailure;
@@ -292,7 +335,8 @@ function classifyRawFailure(res: AnalyzeResponse): { code: AIFailureCode; detail
 /**
  * 统一 AI 编排入口。
  *
- * 最多发起 **2 次**请求：
+ * V3.0.2 默认 probe_guarded：Probe 与 Main **并行**启动（禁止串行）；
+ * 最多发起 **2 次**分析请求（不含 Probe）：
  *   第 1 次 = 正常结构化输出
  *   第 2 次 = 仅在「无效 JSON」或「schema 不符」时，做**一次**修复（不重新分析）
  */
@@ -316,14 +360,29 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
     };
   }
 
-  // ── 1. 构造请求（含 schema 下发） ──
-  const maxTokens = opts.maxTokens ?? preCfg.maxTokens ?? TASK_DEFAULT_MAX_TOKENS[domain];
+  // ── 1. 构造请求（含 schema 下发）──
+  // V3.0.2：maxTokens = request（UI「输出上限」）→ provider → **undefined(Auto)**。
+  // Auto 时请求体省略 max_tokens / maxOutputTokens（adapter 层保证），上限交给 Provider 决定。
+  const maxTokens = opts.maxTokens ?? preCfg.maxTokens;
   const zodSchema = DOMAIN_SCHEMAS[domain];
   const jsonSchema = {
     name: domain === 'comment' ? 'bili_comment_analysis' : `bili_${domain}_analysis`,
     schema: zodToStrictJsonSchema(zodSchema) as Record<string, unknown>,
     strict: true,
   };
+
+  const strategy: AIRequestStrategy = opts.requestStrategy ?? 'probe_guarded';
+  const openTestMode = opts.testMode === true;
+  const probeTimeoutMs = opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
+
+  // V3.0.2：probe_guarded（Probe healthy 后）与 AI Test Mode 下，Main 非流式请求
+  // **不设** BiliScope 人为总时长 timer（30s/60s/120s 到期强杀已被废除）；
+  // 流式请求本就没有总时长限制。`single` 策略保留 V3.0.1 的总超时兜底。
+  const noTotalTimeout = strategy === 'probe_guarded' || openTestMode ? true : undefined;
+
+  // Main 的中止通道：用户取消（opts.signal）与 probe_guarded 看门联动都汇入这里。
+  const mainAbort = new AbortController();
+  const unlinkUserFromMain = linkExternalSignal(opts.signal, mainAbort);
 
   const baseRequest: AnalyzeRequest = {
     systemPrompt: opts.systemPrompt,
@@ -340,21 +399,223 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
     // V3.0.1 · P0-A：流式开关与进度回调（透传到 adapter）
     stream: opts.stream,
     onProgress: opts.onProgress,
+    // V3.0.2：请求语义类型 / 外部中止 / 人为总时长开关
+    requestType: 'analysis',
+    signal: mainAbort.signal,
+    noTotalTimeout,
   };
 
-  // ── 2. 第 1 次请求 ──
+  // ── 2. 第 1 次请求（probe_guarded：Probe 与 Main **并行**启动，禁止串行） ──
+
+  // Probe 基础设施（仅 probe_guarded 创建；single 保持 V3.0.1 行为、不发 Probe）
+  let probeAbort: AbortController | undefined;
+  let probeTask: Promise<ProbeResult> | undefined;
+  let probeResult: ProbeResult | undefined;
+  let probeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  if (strategy === 'probe_guarded') {
+    // V3.0.2：真实阶段 1 —— 「启动 Provider 探针…」（UI 不显示虚假百分比）
+    opts.onProgress?.({ phase: 'probe_pending' });
+    probeAbort = new AbortController();
+    const unlinkUserFromProbe = linkExternalSignal(opts.signal, probeAbort);
+    void unlinkUserFromProbe; // 生命周期与 probeTask 一致，页面级会话无需显式 unlink
+    // 看门：probeTimeoutMs 内 Probe 无有效响应 → 终止 Probe（并联动终止 Main）
+    probeTimer = setTimeout(() => probeAbort?.abort(PROBE_TIMEOUT_MARKER), probeTimeoutMs);
+
+    probeTask = (async (): Promise<ProbeResult> => {
+      const pStart = performance.now();
+      try {
+        const pr = await aiAnalyze({
+          type: domain,
+          targetId: opts.targetId,
+          provider: opts.provider,
+          // 极轻探针：maxTokens=32、非流式、非 JSON、输入不含任何评论数据 ——
+          // 只验证「Provider 是否活着、多久响应」，**绝不分析评论内容**。
+          request: buildProbeRequest({ signal: probeAbort?.signal }),
+          audit: { attempt: 0, requestCount: 0, requestType: 'probe', status: 'probe_ok' },
+        });
+        const healthy = isHealthyProbeText(pr.response.text);
+        return {
+          ok: healthy,
+          latencyMs: Math.round(performance.now() - pStart),
+          httpStatus: 200,
+          text: pr.response.text,
+          requestId: pr.response.responseId,
+          tokenUsage: pr.response.tokenUsage,
+          error: healthy ? undefined : 'probe-response-empty',
+        };
+      } catch (e) {
+        // 看门超时 / 主动取消 / 真实失败：用 abort reason 如实区分，绝不混为一谈
+        const reason = probeAbort?.signal.reason;
+        const timedOut = reason === PROBE_TIMEOUT_MARKER;
+        const cancelled = reason === 'main-completed' || opts.signal?.aborted === true;
+        const error = timedOut
+          ? PROBE_TIMEOUT_MARKER
+          : cancelled && typeof reason === 'string'
+            ? reason
+            : e instanceof Error
+              ? e.message
+              : String(e);
+        // V3.0.2：Probe 失败也必须留下独立审计行（规格：Probe 记录 provider/model/latency/success）；
+        // 「主动取消」（main 先完成 / 用户取消）不算失败，不留行。
+        if (!cancelled) {
+          try {
+            const probeReq = buildProbeRequest();
+            await aiAnalysisRepo.add({
+              id: newId('ai'),
+              type: domain,
+              targetId: opts.targetId,
+              provider: preCfg.name,
+              model: preCfg.model,
+              requestType: 'probe',
+              systemPrompt: probeReq.systemPrompt,
+              userPrompt: probeReq.userPrompt,
+              parsedResult: {
+                __meta: {
+                  requestType: 'probe',
+                  status: 'probe_failed',
+                  probeSuccess: false,
+                  error,
+                  probeTimedOut: timedOut,
+                },
+              },
+              durationMs: Math.round(performance.now() - pStart),
+              createdAt: nowIso(),
+            });
+          } catch {
+            /* 失败审计落库失败不影响主流程 */
+          }
+        }
+        return {
+          ok: false,
+          latencyMs: Math.round(performance.now() - pStart),
+          error,
+        };
+      } finally {
+        // Probe 落定即拆除看门：healthy 后 Main 完全交由 Provider 主导（无人为总时长限制）
+        clearTimeout(probeTimer);
+      }
+    })();
+
+    // 看门联动：Probe 失败（真实失败或 30s 超时）→ 立即终止 Main。
+    // （'main-completed' 是 Main 先完成后对 Probe 的主动取消，不是失败信号。）
+    void probeTask.then((p) => {
+      if (probeResult !== undefined) return;
+      probeResult = p;
+      // V3.0.2：真实阶段 2 —— Probe 已响应 / Probe 失败（UI 显示「Probe 0.8s」）
+      opts.onProgress?.({ phase: p.ok ? 'probe_ready' : 'probe_failed', probeLatencyMs: p.latencyMs });
+      if (!p.ok && p.error !== 'main-completed' && opts.signal?.aborted !== true) {
+        mainAbort.abort(PROBE_TIMEOUT_MARKER);
+      }
+    });
+  } else {
+    // single 策略：V3.0.1 行为 —— 不发 Probe
+    probeResult = skippedProbe();
+  }
+
+  // Main 任务：**立即**发起（与 Probe 并行；`single` 时就是唯一一次请求）
+  const mainTask = runOnce({
+    domain,
+    targetId: opts.targetId,
+    provider: opts.provider,
+    request: baseRequest,
+    attempt: 1,
+    requestCount: 1,
+  });
+
   let first: AttemptOutcome;
   try {
-    first = await runOnce({
-      domain,
-      targetId: opts.targetId,
-      provider: opts.provider,
-      request: baseRequest,
-      attempt: 1,
-      requestCount: 1,
-    });
+    first = await mainTask;
+    // Main 正常完成：若 Probe 仍在跑（比 Main 还慢），主动取消，不再等待看门到期
+    if (probeTask && probeResult === undefined) {
+      probeAbort?.abort('main-completed');
+      await probeTask
+        .then((p) => {
+          if (probeResult === undefined) probeResult = p;
+        })
+        .catch(() => undefined);
+    }
   } catch (e) {
-    // V3.0.1 · P0-4：把异常**分类**为具体失败码（超时 / 限流 / 上下文过大 / 网络 / HTTP）
+    // ── Main 失败 / 被看门终止 ──
+    // 1) 先等 Probe 落定（最多到看门到期），用于如实区分死因
+    if (probeTask && probeResult === undefined) {
+      await probeTask
+        .then((p) => {
+          if (probeResult === undefined) probeResult = p;
+        })
+        .catch(() => undefined);
+    }
+    const durationMs = Math.round(performance.now() - started);
+    unlinkUserFromMain();
+
+    // 2) 用户主动取消：Probe 与 Main 都已被外部信号终止 —— 如实报告，绝不伪装成超时
+    if (opts.signal?.aborted) {
+      return {
+        ok: false,
+        status: 'REQUEST_FAILED',
+        message: '已取消：用户中止了本次 AI 分析',
+        retryable: false,
+        detail: 'user-cancelled',
+        auditId: null,
+        rawText: '',
+        requestCount: 1,
+        durationMs,
+        probe: probeResult,
+      };
+    }
+
+    // 3) 看门超时：Probe 30s 内无有效响应 → REQUEST_PROBE_TIMEOUT
+    //    （绝不显示「AI 请求超时」—— 这是 probe_guarded 专属失败码）
+    if (probeResult && !probeResult.ok && probeResult.error === PROBE_TIMEOUT_MARKER) {
+      const info = describeFailure('REQUEST_PROBE_TIMEOUT');
+      return {
+        ok: false,
+        status: 'REQUEST_PROBE_TIMEOUT',
+        message: info.message,
+        retryable: info.retryable,
+        detail: `探针等待 ${probeResult.latencyMs}ms 无有效响应，已同时终止 Probe 与 Main`,
+        auditId: null,
+        rawText: '',
+        requestCount: 1,
+        durationMs,
+        probe: probeResult,
+      };
+    }
+
+    // 4) Probe 真实失败（非超时；如探针即遇 401/429/5xx/空响应）→ 以探针错误分类上报
+    if (probeResult && !probeResult.ok && probeResult.error !== 'skipped') {
+      if (probeResult.error === 'probe-response-empty') {
+        const info = describeFailure('OUTPUT_EMPTY');
+        return {
+          ok: false,
+          status: 'OUTPUT_EMPTY',
+          message: `探针异常：${info.message}`,
+          retryable: info.retryable,
+          detail: '探针收到 HTTP 200 但无有效文本',
+          auditId: null,
+          rawText: '',
+          requestCount: 1,
+          durationMs,
+          probe: probeResult,
+        };
+      }
+      const info = classifyRequestError(new Error(probeResult.error ?? 'probe failed'), probeTimeoutMs);
+      return {
+        ok: false,
+        status: info.code,
+        message: `探针失败：${info.message}`,
+        retryable: info.retryable,
+        detail: probeResult.error,
+        auditId: null,
+        rawText: '',
+        requestCount: 1,
+        durationMs,
+        probe: probeResult,
+      };
+    }
+
+    // 5) Main 自身真实失败（Probe 仍 healthy / 未启用）→ V3.0.1 分类逻辑
+    //    V3.0.1 · P0-4：把异常**分类**为具体失败码（超时/限流/上下文过大/网络/HTTP/输出超限）
     const info = classifyRequestError(e, preCfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
     return {
       ok: false,
@@ -365,9 +626,12 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       auditId: null,
       rawText: '',
       requestCount: 1,
-      durationMs: Math.round(performance.now() - started),
+      durationMs,
+      probe: probeResult,
     };
   }
+
+  unlinkUserFromMain();
 
   // ── 3. 不可修复类失败直接返回（拒答 / 截断 / 空输出） ──
   const rawFail = classifyRawFailure(first.response);
@@ -379,7 +643,9 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       status: rawFail.code,
       message:
         rawFail.code === 'OUTPUT_TRUNCATED'
-          ? `${info.message}（本次上限 ${first.response.usedMaxTokens ?? maxTokens} tokens，建议提高或减少样本量）`
+          ? (first.response.usedMaxTokens ?? maxTokens) !== undefined
+            ? `${info.message}（本次上限 ${first.response.usedMaxTokens ?? maxTokens} tokens，建议提高或减少样本量）`
+            : `${info.message}（当前输出上限为 Auto：已达到模型自身极限，可在设置中指定更高上限或更换模型）`
           : info.message,
       retryable: info.retryable,
       detail: rawFail.detail,
@@ -387,6 +653,7 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       rawText: first.response.rawText ?? first.response.text,
       requestCount: 1,
       durationMs: Math.round(performance.now() - started),
+      probe: probeResult,
     };
   }
 
@@ -439,6 +706,11 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
           // 修复请求沿用同一流式策略与进度回调，避免「修复一次就退化成硬超时」
           stream: opts.stream,
           onProgress: opts.onProgress,
+          // V3.0.2：修复请求沿用 Main 的中止通道与总时长语义
+          // （probe_guarded / Test Mode 下同样无人为总时长限制）
+          requestType: 'analysis',
+          signal: mainAbort.signal,
+          noTotalTimeout,
         },
         auditExtra: { repairedFrom: first.audit.id, repairOf: firstFailureCode },
         attempt: 2,
@@ -483,6 +755,7 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
       rawText: usedResponse.rawText ?? usedResponse.text,
       requestCount,
       durationMs: Math.round(performance.now() - started),
+      probe: probeResult,
     };
   }
 
@@ -504,13 +777,15 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
 
   const durationMs = Math.round(performance.now() - started);
 
-  // 把引用审计与最终状态回写到审计记录的 __meta（覆盖式更新）
+  // 把引用审计与最终状态回写到**本次 Main 的审计行**（按 id 精确定位，put 覆盖式更新）。
+  // V3.0.2 修复：旧实现 `listByTarget(...).slice(-1)` 在 probe_guarded 下可能命中 Probe 行，
+  // 且 `repo.add` 对已存在主键会抛 ConstraintError 被吞掉 → 回写静默失败。改为 get+put。
   try {
-    const latest = (await aiAnalysisRepo.listByTarget(opts.targetId, domain)).slice(-1)[0];
+    const latest = await db.aiAnalyses.get(first.audit.id);
     if (latest) {
       const prev = (latest.parsedResult ?? {}) as Record<string, unknown>;
       const prevMeta = (prev.__meta ?? {}) as Record<string, unknown>;
-      await aiAnalysisRepo.add({
+      await db.aiAnalyses.put({
         ...latest,
         parsedResult: {
           ...prev,
@@ -522,6 +797,20 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
             requestCount,
             citations: citations as unknown as Record<string, unknown>,
             domainRecordId,
+            // V3.0.2：Probe 分区审计 —— Probe 的 token **不计入**分析成本，
+            // 仅供 UI 显示「Probe 0.8s · Analysis 37.2s」与事后排障。
+            probe: probeResult
+              ? {
+                  requestType: 'probe' as const,
+                  provider: preCfg.name,
+                  model: preCfg.model,
+                  success: probeResult.ok,
+                  latencyMs: probeResult.latencyMs,
+                  httpStatus: probeResult.httpStatus,
+                  requestId: probeResult.requestId,
+                  error: probeResult.error,
+                }
+              : undefined,
           },
         },
       });
@@ -542,6 +831,7 @@ export async function orchestrate(opts: OrchestrateOpts): Promise<OrchestrateRes
     domainRecordId,
     durationMs,
     incomplete: false,
+    probe: probeResult,
   };
 }
 
@@ -561,6 +851,12 @@ export async function orchestrateCommentAnalysis(opts: {
   onProgress?: (info: StreamProgress) => void;
   /** V3.0.1 · P0-A：是否强制流式（不传则按 provider 能力） */
   stream?: boolean;
+  /** V3.0.2：请求策略（默认 probe_guarded：Probe+Main 并行，30s 看门） */
+  requestStrategy?: AIRequestStrategy;
+  /** V3.0.2：AI Test Mode（关闭 BiliScope 一切人为 token/总时长限制） */
+  testMode?: boolean;
+  /** V3.0.2：外部中止信号（用户取消 → 同时终止 Probe 与 Main） */
+  signal?: AbortSignal;
 }): Promise<OrchestrateResult> {
   return orchestrate({
     domain: 'comment',
@@ -573,6 +869,9 @@ export async function orchestrateCommentAnalysis(opts: {
     maxTokens: opts.maxTokens,
     onProgress: opts.onProgress,
     stream: opts.stream,
+    requestStrategy: opts.requestStrategy,
+    testMode: opts.testMode,
+    signal: opts.signal,
   });
 }
 

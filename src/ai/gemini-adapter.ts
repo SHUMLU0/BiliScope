@@ -18,6 +18,7 @@
  */
 
 import { logger } from '@utils/logger';
+import { linkExternalSignal } from './probe';
 import { DEFAULT_TIMEOUT_MS } from './openai-adapter';
 import {
   STREAM_IDLE_TIMEOUT_MS,
@@ -69,7 +70,11 @@ interface GeminiSchema {
   minItems?: number;
 }
 
-const DEFAULT_MAX_TOKENS = 2048;
+/**
+ * V3.0.2：Auto 兜底上限 —— 仅当 Provider 明确 `requiresMaxTokens=true` 时使用。
+ * （V3.0.x 的「任务默认 2048」已删除：BiliScope 默认不主动限制模型输出。）
+ */
+const AUTO_FALLBACK_MAX_TOKENS = 8192;
 
 /** 把 JSON Schema 裁剪为 Gemini 接受的子集 */
 function toGeminiSchema(input: Record<string, unknown>): GeminiSchema {
@@ -121,8 +126,20 @@ export class GeminiAdapter implements AIProvider {
     )}${suffix}`;
   }
 
-  private resolveMaxTokens(req: AnalyzeRequest): number {
-    return req.maxTokens ?? this.cfg.maxTokens ?? DEFAULT_MAX_TOKENS;
+  /**
+   * V3.0.2：Auto 优先的 maxOutputTokens 解析。
+   * `request.maxTokens` → `provider.maxTokens` → **Auto（省略参数）**。
+   * 仅 Provider 明确 `requiresMaxTokens=true` 时才补兜底值。
+   */
+  private resolveMaxTokens(req: AnalyzeRequest): number | undefined {
+    const explicit = req.maxTokens ?? this.cfg.maxTokens;
+    if (explicit !== undefined && explicit !== null && Number.isFinite(explicit)) {
+      return Math.max(1, Math.floor(explicit));
+    }
+    if (this.cfg.requiresMaxTokens === true) {
+      return this.cfg.fallbackMaxTokens ?? AUTO_FALLBACK_MAX_TOKENS;
+    }
+    return undefined;
   }
 
   /** 优先级：`request.stream` → `provider.supportsStreaming` → 非流式 fallback */
@@ -138,10 +155,15 @@ export class GeminiAdapter implements AIProvider {
     return 'json_object';
   }
 
-  private buildBody(req: AnalyzeRequest, m: StructuredOutputMode, usedMaxTokens: number): Record<string, unknown> {
+  private buildBody(
+    req: AnalyzeRequest,
+    m: StructuredOutputMode,
+    usedMaxTokens: number | undefined,
+  ): Record<string, unknown> {
     const cfg: Record<string, unknown> = {
       temperature: req.temperature ?? 0.2,
-      maxOutputTokens: usedMaxTokens,
+      // V3.0.2：Auto（undefined）时不下发 maxOutputTokens，交给 Gemini 自身上限。
+      ...(usedMaxTokens !== undefined ? { maxOutputTokens: usedMaxTokens } : {}),
     };
     if (m !== 'prompt_only') {
       // responseMimeType 保证「是 JSON」；responseSchema 保证「符合结构」
@@ -163,9 +185,11 @@ export class GeminiAdapter implements AIProvider {
   private async sendStreaming(
     req: AnalyzeRequest,
     mode: StructuredOutputMode,
-    usedMaxTokens: number,
+    usedMaxTokens: number | undefined,
   ): Promise<{ data: GeminiResp; stream: StreamMeta }> {
     const ctrl = new AbortController();
+    // V3.0.2：外部中止（用户取消 / probe_guarded 联动）优先于内部看门狗
+    const unlink = linkExternalSignal(req.signal, ctrl);
     const startedAt = performance.now();
     let lastChunkAt = 0;
     let firstByteAt = 0;
@@ -199,7 +223,9 @@ export class GeminiAdapter implements AIProvider {
       signal: ctrl.signal,
     }).catch((e: unknown) => {
       clearInterval(watchdog);
-      if (timedOut || isAbortError(e)) {
+      unlink();
+      // V3.0.2：只有空闲看门狗触发的中止才改写为 idle-timeout；外部中止原样上抛
+      if (timedOut) {
         throw new Error(
           `stream idle timeout: 连续 ${Math.round(STREAM_IDLE_TIMEOUT_MS / 1000)} 秒没有收到任何新响应`,
         );
@@ -209,11 +235,13 @@ export class GeminiAdapter implements AIProvider {
 
     if (!res.ok) {
       clearInterval(watchdog);
+      unlink();
       const txt = await res.text().catch(() => '');
       throw new Error(`HTTP ${res.status}: ${txt.slice(0, 300)}`);
     }
     if (!res.body) {
       clearInterval(watchdog);
+      unlink();
       throw new Error('stream response has no body');
     }
 
@@ -276,6 +304,7 @@ export class GeminiAdapter implements AIProvider {
       );
     } finally {
       clearInterval(watchdog);
+      unlink();
     }
 
     if (timedOut) {
@@ -303,7 +332,11 @@ export class GeminiAdapter implements AIProvider {
 
     const sendNonStreaming = async (m: StructuredOutputMode): Promise<GeminiResp> => {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      // V3.0.2：外部中止优先；noTotalTimeout（probe healthy / Test Mode）时不设人为总时长 timer
+      const unlink = linkExternalSignal(req.signal, ctrl);
+      const timer = req.noTotalTimeout
+        ? null
+        : setTimeout(() => ctrl.abort(), this.cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS);
       try {
         const res = await fetch(this.url(false), {
           method: 'POST',
@@ -318,7 +351,8 @@ export class GeminiAdapter implements AIProvider {
         }
         return (await res.json()) as GeminiResp;
       } finally {
-        clearTimeout(timer);
+        if (timer !== null) clearTimeout(timer);
+        unlink();
       }
     };
 
@@ -435,10 +469,4 @@ interface StreamMeta {
   lastChunkAt: number;
   chunkCount: number;
   receivedChars: number;
-}
-
-/** 判断异常是否为 AbortError */
-function isAbortError(e: unknown): boolean {
-  if (!e || typeof e !== 'object') return false;
-  return (e as { name?: string }).name === 'AbortError';
 }

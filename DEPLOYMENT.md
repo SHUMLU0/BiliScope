@@ -156,12 +156,14 @@ AI 分析走统一编排：**Provider → 请求 → 结构化输出 → Zod 校
 - 详见 `ai-history.html`（「AI 历史」）——可按类型筛选、展开查看每次请求的原始 prompt 与响应。
 
 ## 十一、版本
-当前：**v3.0.1**（**V3.0.1 —— V3.0 可验证 AI 分析系统的稳定性 / 性能 / UI / 文档维护版**。维护版，不新增研究方向、不重写采集层：
-修复 V3.0.0 的 6 个真实缺陷 —— ① `buildCommentAnalyzePrompt()` 自行 `slice(0,200)` 绕过 prepare 层的 120 条上限；② `mapToCommentAnalysis()` 把 Provider 原始响应 `rawResponse` 写成产品结果、UI 又强转成 `CommentAIResult`；
-③ AI 成功后 `refresh()` 再用错位的 `rawResponse` 覆盖正确 report；④ 所有请求异常一律 `REQUEST_FAILED` 无法诊断；⑤ 默认超时 30s 过短；⑥ AI 失败清空历史成功结果。
-新增 `CommentAnalysis.analysisResult`（Zod 校验过的结构化业务结果，UI 唯一可消费来源）；请求失败细分为 `REQUEST_TIMEOUT / REQUEST_HTTP_ERROR / REQUEST_NETWORK_ERROR / REQUEST_RATE_LIMITED / REQUEST_CONTEXT_TOO_LARGE / REQUEST_PROVIDER_ERROR`；
-默认超时提高到 60s 并在设置页可选 30/60/90/120s；AI 样本与统计基数分离（`统计基数：200 · AI 分析样本：120`，支持高赞/最新/多样性策略，默认上限 120，**prompt 构造器被禁止再 slice**）；
-AI UI 前置到统计事实之前（以最终 dist 构建产物验收）；AI 阶段状态提示（真实阶段 + 真实秒数，无假进度）；AI 输入预算可视化；README 全面重写并整理文档结构（`docs/development/` + `docs/SPEC.md`，仓库内 0 死链接）。
-承接 V3.0.0 可验证 AI 分析系统 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V0.2.1 评论采集真实性修复（`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
+当前：**v3.0.2**（**V3.0.2 —— AI 开放测试模式**。解除 BiliScope 自我施加的 AI 请求/输出限制，只保留 Provider 自身限制：
+① 输出上限默认 **Auto** —— 请求体省略 `max_tokens`，删除 V3.0.1 的 comment=4096 任务级硬编码，仅 Provider `requiresMaxTokens` 时回退 8192；
+② **`probe_guarded` 探针守护策略** —— 极轻探针（max_tokens=32 / 非流式 / 非评论数据）与真实分析**并行**启动，看门 30s 无探针响应 → `REQUEST_PROBE_TIMEOUT`；
+探针通过 → **取消一切人为总时长限制**（30s/60s/120s 强杀绝对禁止）；
+③ **AI Test Mode** 一键关闭全部人为限制（UI 明示不代表模型无限上下文/无限输出）；
+④ 探针审计分区 `requestType='probe'|'analysis'`，探针 token 不计入分析成本，UI 显示 `Probe 0.8s · Analysis 37.2s`；
+⑤ 样本量放宽至 `[60,80,120,160,200]`；⑥ 新增失败码 `OUTPUT_LIMIT_PROVIDER`（输出超限，优先于 context-too-large）；
+⑦ 分析可取消；⑧ 审计回写改为按 id `get`+`put`（修复 probe_guarded 下回写静默失败）。
+承接 V3.0.1 稳定性/性能/UI/文档维护版 → V3.0.0 可验证 AI 分析系统 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V0.2.1 评论采集真实性修复（`REAL_API_PASS`） → V0.2.0 研究能力升级 → V0.1.4 数据迁移修复 → V0.1.3 归一化字段映射 → V0.1.2 真实链路修复 → V0.1.1 数据链路修复）
 
-历史版本：v3.0.0 / v0.2.2 / v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。
+历史版本：v3.0.1 / v3.0.0 / v0.2.2 / v0.2.1 / v0.2.0 / v0.1.4 / v0.1.3 / v0.1.2 / v0.1.1 / v0.1.0。

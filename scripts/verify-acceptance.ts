@@ -359,7 +359,21 @@ async function main(): Promise<void> {
 
     const bodies: Array<Record<string, unknown>> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      // V3.0.2 probe_guarded：识别探针请求（max_tokens=32），单独应答 'OK'，
+      // 不计入分析请求体记录 —— Probe 与 Main 并行，审计严格分区。
+      if (body.max_tokens === 32) {
+        return new Response(
+          JSON.stringify({
+            id: 'acceptance-probe',
+            model: 'acceptance-model',
+            choices: [{ finish_reason: 'stop', message: { content: 'OK' } }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+      bodies.push(body);
       return new Response(
         JSON.stringify({
           id: 'acceptance-1',
@@ -379,10 +393,16 @@ async function main(): Promise<void> {
       userPrompt: 'user',
       knownRpids: ['101', '102', '103'],
     });
-    const sentMaxTokens = Number(bodies[0]?.max_tokens ?? 0);
+    // V3.0.2 Auto：main 请求体**省略** max_tokens（不再有 4096 任务级硬编码）。
+    // Probe 与 Main 并行，bodies 只收 main 请求；审计行 = probe 1 + analysis 1。
+    const mainBody = bodies[0] ?? {};
+    const sentMaxTokens: number | undefined =
+      'max_tokens' in mainBody ? Number(mainBody.max_tokens) : undefined;
     const storedRows = await db.commentAnalyses.toArray();
     const stored = storedRows.length;
-    const audits = (await db.aiAnalyses.toArray()).length;
+    const auditRows = await db.aiAnalyses.toArray();
+    const audits = auditRows.length;
+    const probeAuditRows = auditRows.filter((a) => a.requestType === 'probe');
 
     // V3.0.1 · P0-2：产品结果必须落库到 analysisResult（结构化业务结果），
     // rawResponse 仅作审计用途，UI 不得消费 rawResponse。
@@ -403,8 +423,9 @@ async function main(): Promise<void> {
       res.data.summary === GOOD_RESULT.summary &&
       res.domainRecordId !== null &&
       stored === 1 &&
-      audits === 1 &&
-      sentMaxTokens >= 4096 &&
+      audits === 2 &&
+      probeAuditRows.length === 1 &&
+      sentMaxTokens === undefined &&
       res.requestCount === 1 &&
       hasAnalysisResult &&
       persistedSummaryOk &&
@@ -414,8 +435,8 @@ async function main(): Promise<void> {
         'TEST 008',
         'AI 配置模型调用',
         'PASS',
-        `orchestrate SUCCESS data.summary 正确 / max_tokens=${sentMaxTokens}(≥4096) / CommentAnalysis=1 AIAnalysis=1 / ` +
-          `analysisResult 已落库且 summary 一致 / rawResponse 仅审计 / requests=${res.requestCount}`,
+        `orchestrate SUCCESS data.summary 正确 / max_tokens=omitted(Auto) / probe审计+analysis审计=2 ` +
+          `/ CommentAnalysis=1 / analysisResult 已落库且 summary 一致 / rawResponse 仅审计 / requests=${res.requestCount}`,
       );
     } else {
       record(
@@ -423,8 +444,8 @@ async function main(): Promise<void> {
         'AI 配置模型调用',
         'FAIL',
         `cfgOk=${cfgOk} ok=${res.ok} status=${res.ok ? res.status : (res as { status: string }).status} ` +
-          `maxTokens=${sentMaxTokens} stored=${stored} audits=${audits} ` +
-          `analysisResult=${hasAnalysisResult} summaryOk=${persistedSummaryOk} rawIsAudit=${rawIsAudit}`,
+          `maxTokens=${sentMaxTokens === undefined ? 'omitted' : String(sentMaxTokens)} stored=${stored} audits=${audits} ` +
+          `probeRows=${probeAuditRows.length} analysisResult=${hasAnalysisResult} summaryOk=${persistedSummaryOk} rawIsAudit=${rawIsAudit}`,
       );
     }
 
@@ -435,7 +456,17 @@ async function main(): Promise<void> {
 
     const V = validateAIResult('comment', unwrapAIResult({ ok: 1 }));
     let i = 0;
-    globalThis.fetch = (async (): Promise<Response> => {
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      // V3.0.2：探针请求不计数、独立应答 'OK'（i 只统计真实分析请求）
+      if (body.max_tokens === 32) {
+        return new Response(
+          JSON.stringify({
+            choices: [{ finish_reason: 'stop', message: { content: 'OK' } }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
       i++;
       return new Response(
         JSON.stringify({
@@ -455,7 +486,17 @@ async function main(): Promise<void> {
     // 无效 JSON 场景：两次都失败 → 绝不写 CommentAnalysis
     localStorage.setItem(KEY, JSON.stringify(store));
     let j = 0;
-    globalThis.fetch = (async (): Promise<Response> => {
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      // V3.0.2：探针请求不计数、独立应答 'OK'（j 只统计真实分析请求）
+      if (body.max_tokens === 32) {
+        return new Response(
+          JSON.stringify({
+            choices: [{ finish_reason: 'stop', message: { content: 'OK' } }],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
       j++;
       return new Response(
         JSON.stringify({

@@ -1,8 +1,49 @@
-# FINAL_AUDIT.md — BiliScope V3.0.1 最终审计
+# FINAL_AUDIT.md — BiliScope V3.0.2 最终审计
 
-> 生成于 2026-09-28 · 当前版本 **V3.0.1**（V3.0 可验证 AI 分析系统的稳定性 / 性能 / UI / 文档维护版）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-29 · 当前版本 **V3.0.2**（AI 开放测试模式）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
 >
-> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → **V3.0.1 稳定性 / 性能 / UI / 文档维护版**
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → V3.0.1 稳定性 / 性能 / UI / 文档维护版 → **V3.0.2 AI 开放测试模式**
+
+---
+
+## 0x. V3.0.2 AI 开放测试模式
+
+> 定位：解除 BiliScope 自我施加的 AI 请求/输出限制，**只保留 Provider 自身限制**。
+> **AI Test Mode 明示：不代表模型拥有无限上下文或无限输出。**
+> **不改**：采集层 / CommentCollector / WBI / Dexie 数据层；**不删**历史数据与历史审计。
+
+### 交付项
+
+| # | 交付 | 实现 | 测试 |
+|---|---|---|---|
+| 1 | 输出上限 Auto（默认） | 删除 `TASK_DEFAULT_MAX_TOKENS`（含 comment=4096 硬编码）；请求体**省略** `max_tokens`/`maxOutputTokens`；仅 `requiresMaxTokens===true` 回退 `fallbackMaxTokens ?? 8192`；UI 选项 Auto/4096/8192/16384/32768/自定义 | `AI-LIMIT-001/002/003/003b` |
+| 2 | `probe_guarded` 策略 | Probe（max_tokens=32 / 非流式 / 非评论数据 / 返回 OK 即可）与 Main **并行**；看门 30s → `REQUEST_PROBE_TIMEOUT`；healthy → **取消一切人为总时长限制**；Main 只由 Provider 完成 / MAX_TOKENS / 断连 / 用户取消结束 | `AI-PROBE-001..004` |
+| 3 | 探针失败 / 用户取消 | 探针 401/429/5xx → 独立分类（「探针失败：」前缀）；空探针响应 → OUTPUT_EMPTY；用户取消 → 如实「已取消」绝不伪装超时 | `AI-PROBE-005/007` |
+| 4 | 探针审计分区 | `requestType='probe'|'analysis'`；探针 token 不计入分析成本；Main 审计回写按 id `get`+`put` 携带 `meta.probe`（修复 `slice(-1)` 命中探针行 + `add` 主键冲突被吞的静默失败） | `AI-PROBE-006` |
+| 5 | UI 真实状态 | 7 阶段标签（无假百分比）；`Probe 0.8s · Analysis 37.2s` 分区耗时；「取消分析」按钮；Test Mode 开关 + 警示文案 | — |
+| 6 | `OUTPUT_LIMIT_PROVIDER` | 输出超限独立失败码，优先级在 context-too-large 之前；Auto 的 `OUTPUT_TRUNCATED` 文案不再提示 BiliScope timeout | `AI-LIMIT-004` |
+| 7 | 样本放宽 | select `[60,80,120,160,200]`；统计与抽样分区不变量不变 | 既有 AI-PERF 套件 |
+| 8 | verify-acceptance 修正 | TEST 008：断言请求体省略 `max_tokens` + 审计 `probe+analysis=2`；TEST 009：请求计数排除探针 | TEST 001-009 |
+
+### 关键不变量（V3.0.2 后成立）
+
+- V3.0.1 全部不变量继续成立（统计/抽样分区、analysisResult 唯一来源、失败不清空、unknown ≠ 0）。
+- **Auto 语义**：`request.maxTokens → provider.maxTokens → Auto（省略）`；不存在任务级硬编码。
+- **探针通过后无人为总时长限制**：`strategy='probe_guarded' || testMode` 时非流式路径不设总 timer。
+- 探针与真实分析审计严格分区；探针失败零产品落库（探针审计行保留，主动取消不留行）。
+- 版本号六处对齐 `3.0.2`。
+
+### 门禁实测结果（本地，2026-09-29）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| test | `vitest run` | **PASS** 391 passed / 2 skipped / 0 failed（36 文件，含 AI-PROBE 8 用例 + AI-LIMIT 4 断言组） |
+| typecheck / lint / build / test:dist / scan-secrets / acceptance | 见下文门禁链章节 | 本轮执行（见发布记录） |
+
+### 真实性边界（本审计不粉饰）
+
+- Real Provider E2E：依赖使用者本地 API Key，仓库内自动化测试使用 **mock fetch** → 若本地无可用 Provider，报告为 **REAL AI ENVIRONMENT LIMITED**，**不得**当作 `REAL AI PASS`。
+- Chrome E2E：命令行 `--load-extension` 在本机不加载未打包扩展 → **`CHROME_E2E_ENV_LIMITED`**（≠ FAIL）。
 
 ---
 
