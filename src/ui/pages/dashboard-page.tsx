@@ -10,7 +10,7 @@
 import { useEffect, useState } from 'react';
 import { Nav } from '../components/Nav';
 import { db } from '@db/database';
-import type { AIAnalysis, CommentAnalysis } from '@models/index';
+import type { AIAnalysis, CommentAnalysis, Video } from '@models/index';
 
 interface Kpis {
   videos: number;
@@ -26,11 +26,18 @@ interface Kpis {
 interface RecentLists {
   ai: AIAnalysis[];
   commentAnalyses: CommentAnalysis[];
+  /**
+   * V3.2.1 · P0：Video.id → Video 映射。
+   * CommentAnalysis.videoId 存的是**本地 Dexie Video.id**（不是 bvid）——
+   * 旧实现直接把它当 bvid 拼 comment.html 链接，点了必进错误页面。
+   * 链接必须经映射换算成真实 `video.bvid`；Video 记录缺失时不生成 href。
+   */
+  videoById: Map<string, Video>;
 }
 
 export function DashboardPage() {
   const [kpis, setKpis] = useState<Kpis | null>(null);
-  const [recent, setRecent] = useState<RecentLists>({ ai: [], commentAnalyses: [] });
+  const [recent, setRecent] = useState<RecentLists>({ ai: [], commentAnalyses: [], videoById: new Map() });
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -52,6 +59,7 @@ export function DashboardPage() {
         recentTasks,
         ai,
         ca,
+        videoRows,
       ] = await Promise.all([
         db.videos.count(),
         db.comments.count(),
@@ -69,7 +77,10 @@ export function DashboardPage() {
           .limit(6)
           .toArray(),
         db.commentAnalyses.orderBy('createdAt').reverse().limit(6).toArray(),
+        // V3.2.1 · P0：id→Video 映射数据源（与统计并行取，互不阻塞）
+        db.videos.toArray(),
       ]);
+      const videoById = new Map<string, Video>(videoRows.map((v) => [v.id, v]));
       const ok = recentTasks.filter((t) => t.status === 'success' || t.status === 'partial').length;
       setKpis({
         videos,
@@ -81,7 +92,7 @@ export function DashboardPage() {
         recentTaskTotal: recentTasks.length,
         recentTaskOk: ok,
       });
-      setRecent({ ai, commentAnalyses: ca });
+      setRecent({ ai, commentAnalyses: ca, videoById });
       setError('');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -174,16 +185,25 @@ export function DashboardPage() {
               </tr>
             </thead>
             <tbody>
-              {recent.commentAnalyses.map((c) => (
+              {recent.commentAnalyses.map((c) => {
+                // V3.2.1 · P0：videoId 是本地 Video.id，必须经映射换算成真实 bvid 再拼链接；
+                // Video 记录缺失 → 显示「视频记录缺失」纯文本，绝不生成错误 href
+                const linkedVideo = recent.videoById.get(c.videoId);
+                return (
                 <tr key={c.id}>
                   <td className="mono">{shortTime(c.createdAt)}</td>
                   <td>
-                    <a href={`comment.html?bvid=${encodeURIComponent(c.videoId)}`}>{c.videoId}</a>
+                    {linkedVideo ? (
+                      <a href={`comment.html?bvid=${encodeURIComponent(linkedVideo.bvid)}`}>{linkedVideo.bvid}</a>
+                    ) : (
+                      <span className="faint">视频记录缺失</span>
+                    )}
                   </td>
                   <td>{c.citedCommentRpids.length > 0 ? c.citedCommentRpids.length : '–'}</td>
                   <td>{c.analysisResult ? '有结果' : '待重分析'}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}

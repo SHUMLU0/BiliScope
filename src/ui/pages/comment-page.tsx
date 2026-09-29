@@ -7,7 +7,10 @@ import { orchestrateCommentAnalysis } from '@ai/orchestrator';
 import { loadIdleTimeoutAsync } from '@ai/settings';
 import { describeProbeStatus } from '@ai/probe';
 import { describeFailure, type AIFailureInfo } from '@ai/failures';
-import { forEachResultRefs, type CommentAIResult } from '@ai/schemas';
+import { forEachResultRefs, validateAIResult, type CommentAIResult } from '@ai/schemas';
+import { detectCommentAnalysisVersion } from '@ai/compat';
+import { parseBvid } from '@utils/bvid';
+import { ErrorBoundary } from '../components/ErrorBoundary';
 import type { StreamProgress } from '@ai/types';
 import { CommentAIReport, AIFailureNotice } from '../components/CommentAIReport';
 import { computeCommentStats, countKeywords, topComments } from '@services/analytics';
@@ -32,10 +35,18 @@ interface StoredReport {
   record: CommentAnalysis;
   /**
    * V3.0.1 · P0-2：**结构化业务结果**（来自 `CommentAnalysis.analysisResult`）。
-   * `null` 表示该记录是 V3.0.0 及更早写入的旧记录（未保存结构化结果），UI 必须显式提示重新分析。
-   * ⚠️ 绝不从 `rawResponse` 里取 —— 那是 Provider 原始响应，不是业务结果。
+   * `null` 表示该记录不是当前 schema 的合法结果 —— UI 必须按 `resultVersion` 显式提示，
+   * 绝不从 `rawResponse` 里取（那是 Provider 原始响应，不是业务结果）。
    */
   analysisResult: CommentAIResult | null;
+  /**
+   * V3.2.1 · P0：结果版本三态（运行时验证的结论，不是盲 cast 的假设）：
+   *   - 'current'：V3.2 研究契约合法（validateAIResult 通过）→ 正常渲染报告；
+   *   - 'legacy' ：V3.1.x 分类式旧结果（有 legacy 特征字段）→ 显式降级提示 + 重新分析；
+   *   - 'invalid'：损坏 / 非法数据 → 显式错误提示，绝不渲染、绝不假装成功；
+   *   - 'none'   ：V3.0.x 及更早记录，无 analysisResult 列 → 「请重新分析」。
+   */
+  resultVersion: 'current' | 'legacy' | 'invalid' | 'none';
 }
 
 /**
@@ -125,7 +136,8 @@ export function CommentPage() {
 
   useEffect(() => {
     const sp = new URLSearchParams(location.search);
-    const b = sp.get('bvid');
+    // V3.2.1 · P0：统一 parseBvid 归一化 —— 完整视频链接 / ?p=2 / spm 参数一律提取 canonical BV 号
+    const b = parseBvid(sp.get('bvid'));
     if (b) setBvid(b);
   }, []);
 
@@ -154,10 +166,33 @@ export function CommentPage() {
       setReport(null);
       return;
     }
-    // V3.0.1 · P0-2：只认 analysisResult（Zod 校验过的结构化业务结果）。
-    // 绝不再把 rawResponse（Provider 原始响应）当作业务结果 —— 那是 V3.0.0 的语义错位缺陷。
-    const analysisResult = (latest.analysisResult ?? null) as CommentAIResult | null;
-    setReport({ record: latest, analysisResult });
+    // V3.2.1 · P0（WHITE-SCREEN 根因修复）：不再盲 cast。
+    // 静态类型 `CommentAIResult | undefined` 只对 V3.2.0 之后写入的数据成立；
+    // Dexie 直读不经过 Zod，旧记录（V3.1.x legacy / V3.0.x 无该列 / 损坏数据）
+    // 运行时可能是任意形状 —— 盲 cast 后 `result.narratives.filter()` 直接 throw → React 白屏。
+    // 现在按「运行时验证 → 三态分类」处理，三种情况都渲染明确的 UI，绝不 throw、绝不假装成功。
+    const raw: unknown = latest.analysisResult;
+    if (raw === undefined || raw === null) {
+      // V3.0.x 及更早：记录存在但没有 analysisResult 列
+      setReport({ record: latest, analysisResult: null, resultVersion: 'none' });
+    } else {
+      const validated = validateAIResult('comment', raw);
+      if (validated.ok) {
+        // A 态：V3.2 研究契约合法（validateAIResult 的 data 已通过结构签名 + Zod 两级校验；
+        // domain 显式为 'comment'，类型收窄安全）
+        setReport({
+          record: latest,
+          analysisResult: validated.data as CommentAIResult,
+          resultVersion: 'current',
+        });
+      } else if (detectCommentAnalysisVersion(raw) === 'legacy') {
+        // B 态：V3.1.x 分类式旧结果 —— 显式降级提示，绝不强转成新 schema、绝不假装成功
+        setReport({ record: latest, analysisResult: null, resultVersion: 'legacy' });
+      } else {
+        // C 态：损坏 / 非法数据 —— 显式错误提示
+        setReport({ record: latest, analysisResult: null, resultVersion: 'invalid' });
+      }
+    }
     // V3.2.0 · AI-META：auditId → AIAnalysis 审计行 → 恢复真实元数据
     let meta: AIMetaDisplay = {
       model: latest.model,
@@ -210,16 +245,18 @@ export function CommentPage() {
   }, [refresh]);
 
   const handleFetch = async (): Promise<void> => {
-    if (!/^BV[0-9A-Za-z]{10}$/.test(bvid)) {
+    // V3.2.1 · P0：统一 parseBvid 入口 —— 用户可粘贴裸 BV 号或完整视频链接（含 ?p= / spm）
+    const canonicalBvid = parseBvid(bvid);
+    if (!canonicalBvid) {
       setStatusLevel('error');
-      setStatus('请输入合法 BV 号（BV + 10 位）');
+      setStatus('请输入合法 BV 号（BV + 10 位，或直接粘贴视频链接）');
       return;
     }
     setStatusLevel('info');
     setStatus('采集评论中…');
     setAiFailure(null);
     setDiag('');
-    const r = await collector.collectComments(bvid, { sort, tier, depth });
+    const r = await collector.collectComments(canonicalBvid, { sort, tier, depth });
     if (!r.ok) {
       // V0.2.2：区分失败类型，不再把所有失败都压成「采集失败」
       const envLimited = r.diagnostics?.environmentLimited === true;
@@ -357,8 +394,10 @@ export function CommentPage() {
           // V3.1.0 · P0-AI 隐私化：内存里的产品结果也带映射（DB 记录由 orchestrate 落库）
           citationMap: snap.citationMap,
         },
-        // V3.0.1 · P0-2：产品结果持有结构化业务结果（不是 Provider 原始响应）
+        // V3.0.1 · P0-2：产品结果持有结构化业务结果（不是 Provider 原始响应）；
+        // V3.2.1：orchestrate 返回的 r.data 已经过 orchestrator 内 Zod 校验 → current
         analysisResult: r.data,
+        resultVersion: 'current',
       } as StoredReport);
       setAiMeta({
         model: r.usedConfig.model,
@@ -813,22 +852,54 @@ export function CommentPage() {
         </section>
       )}
 
-      {/* ── AI 分析报告（结构化业务结果） ── */}
+      {/* ── AI 分析报告（结构化业务结果，仅 current 态渲染） ──
+           V3.2.1：ErrorBoundary 是最后保险 —— 即使防御层全部失效，渲染异常也绝不白屏 */}
       {report?.analysisResult && (
-        <CommentAIReport
-          result={report.analysisResult}
-          unknownRefs={aiMeta?.unknownRefs ?? []}
-          claimsWithoutCitation={aiMeta?.claimsWithoutCitation ?? 0}
-          repaired={aiMeta?.repaired ?? false}
-          requestCount={aiMeta?.requestCount ?? 0}
-          durationMs={aiMeta?.durationMs ?? 0}
-          model={aiMeta?.model ?? report.record.model}
-          onLocateRef={locateRef}
-        />
+        <ErrorBoundary label="AI 分析报告">
+          <CommentAIReport
+            result={report.analysisResult}
+            unknownRefs={aiMeta?.unknownRefs ?? []}
+            claimsWithoutCitation={aiMeta?.claimsWithoutCitation ?? 0}
+            repaired={aiMeta?.repaired ?? false}
+            requestCount={aiMeta?.requestCount ?? 0}
+            durationMs={aiMeta?.durationMs ?? 0}
+            model={aiMeta?.model ?? report.record.model}
+            onLocateRef={locateRef}
+          />
+        </ErrorBoundary>
+      )}
+
+      {/* V3.2.1 · P0 · B 态：V3.1.x 旧 schema 结果 —— 显式降级，绝不强转、绝不假装成功 */}
+      {report && report.resultVersion === 'legacy' && (
+        <section className="card stack">
+          <h3 style={{ margin: 0 }}>AI 分析报告</h3>
+          <div className="warn">该分析来自旧版本，当前报告结构已经升级。</div>
+          <div className="faint">
+            记录时间：{report.record.createdAt.slice(0, 19).replace('T', ' ')} · 模型 {report.record.model} ·
+            旧结果按原样保留在本地（不会被改写或迁移）；点击「重新分析」将以当前版本重新生成研究报告。
+          </div>
+          <div>
+            <button className="primary" onClick={handleAI}>
+              重新分析
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* V3.2.1 · P0 · C 态：损坏 / 非法数据 —— 显式错误，绝不渲染脏数据 */}
+      {report && report.resultVersion === 'invalid' && (
+        <section className="card stack">
+          <h3 style={{ margin: 0 }}>AI 分析报告</h3>
+          <div className="error">该历史 AI 结果已损坏，无法展示。</div>
+          <div className="faint">
+            记录时间：{report.record.createdAt.slice(0, 19).replace('T', ' ')} · 模型 {report.record.model} ·
+            原始数据仍保留在本地；如需查看，请在「AI 历史」中检查审计记录，或重新分析。
+          </div>
+        </section>
       )}
 
       {/* V3.0.1 · P0-2：旧版本记录（无结构化结果）—— 显式提示，绝不猜测 */}
-      {report && !report.analysisResult && (
+      {report && report.resultVersion === 'none' && (
         <section className="card stack">
           <h3 style={{ margin: 0 }}>AI 分析报告</h3>
           <div className="warn">

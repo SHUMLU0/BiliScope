@@ -2,6 +2,46 @@
 
 本项目遵循 [Semantic Versioning](https://semver.org/) 规范。
 
+## [V3.2.1] - 2026-09-29
+
+**Comment Research Runtime Safety + Dashboard Route Fix**：维护版 —— 任何输入
+（无参数 / 旧数据 / 损坏数据 / 完整视频链接）都不再白屏，研究台链接指向真实视频。
+**不重写 AI 架构 / 采集层 / WBI / Dexie，不删历史数据与审计，不做假迁移。**
+
+### Fixed
+
+- **评论研究页白屏（WHITE-SCREEN 根因）**：`CommentPage.loadStoredReport` 曾把
+  `analysisResult` 盲 cast 成 `CommentAIResult` —— Dexie 直读不经过 Zod，
+  V3.1.x 旧记录（facts/themes 分类式结果）在 `result.narratives.filter()` 处
+  throw → React 白屏。现在接入 `validateAIResult('comment', ...)` +
+  `detectCommentAnalysisVersion()` 运行时三态验证：V3.2 合法 → 正常渲染；
+  V3.1.x 旧 schema → 显式提示「该分析来自旧版本，当前报告结构已经升级。」
+  并提供「重新分析」；损坏数据 → 「该历史 AI 结果已损坏，无法展示。」。
+  绝不 throw、绝不白屏、绝不假装成功、绝不把旧数据强转新 schema。
+- **CommentAIReport 数组防御**：全部顶层数组字段（narratives / claims /
+  relevantFacts / tensions / audienceSegments / mechanisms / signalVsNoise /
+  contentImplications / hypothesesToTest / needs / questions / uncertainty /
+  nextResearch）与嵌套 refs 数组 `?? []` 兜底 —— 即使调用方漏掉入口验证，
+  报告组件也不会因历史数据直接崩溃（最后一道防线，不替代 schema validation）。
+- **研究台链接指向错误页面（DASHBOARD 路由）**：`DashboardPage` 曾把
+  `CommentAnalysis.videoId`（本地 Dexie Video.id）直接当 bvid 拼
+  `comment.html?bvid=` 链接，点击必进错误页面。现在经 `Video.id → Video` 映射
+  换算成真实 `video.bvid` 生成 href；Video 记录缺失时显示「视频记录缺失」，
+  绝不生成错误链接。
+- **BV 号输入不统一**：新增 `parseBvid()`（`src/utils/bvid.ts`）作为唯一解析
+  入口 —— 裸 BV 号 / 完整视频链接 / `?p=` 分 P / `spm` 参数一律提取 canonical
+  BV 号；CommentPage URL 参数与采集输入统一走该入口，粘贴视频链接不再被拒。
+- **渲染异常兜底（ErrorBoundary）**：评论研究页报告区新增最小 React
+  ErrorBoundary —— 未预期渲染异常显示「页面渲染出错」摘要与重试按钮，
+  绝不白屏；错误原文展示，不掩盖 schema bug。
+
+### Tests
+
+- 新增 `WHITE-SCREEN-001..008`（无 bvid / 无 Video / 无分析 / legacy 不 throw /
+  malformed 不 throw / V3.2 正常渲染 / 刷新恢复 / 切换 BV 不残留，
+  全部为 jsdom 真实 React 渲染测试）+ `DASHBOARD-001..003`（id→bvid 映射 /
+  缺失不生成 href / 跨页 parseBvid 闭环）+ `parseBvid / 三态判定` 单元测试。
+
 ## [V3.2.0] - 2026-09-29
 
 **Comment Research Analyst（评论研究分析师）**：评论 AI 从「评论整理器」升级为

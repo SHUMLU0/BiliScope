@@ -48,9 +48,11 @@ export function RefChip({ refId, onLocate }: { refId: string; onLocate?: (ref: s
   );
 }
 
-/** 引用行：有 refs 渲染 chips，无 refs 显式标注「无引用」（不假装有证据） */
-function RefsRow({ refs, onLocate, emptyText }: { refs: string[]; onLocate?: (ref: string) => void; emptyText?: string }): ReactNode {
-  if (!refs.length) return <span className="faint warn">{emptyText ?? '无引用（该判断未指向任何真实评论）'}</span>;
+/** 引用行：有 refs 渲染 chips，无 refs 显式标注「无引用」（不假装有证据）。
+ * V3.2.1 · P0-2：refs 允许 undefined（历史/异常数据的元素可能缺字段）—— 组件内兜底，
+ * 覆盖全部 8 个调用点，不让 `.length` 在脏数据上 throw。 */
+function RefsRow({ refs, onLocate, emptyText }: { refs?: string[]; onLocate?: (ref: string) => void; emptyText?: string }): ReactNode {
+  if (!refs || refs.length === 0) return <span className="faint warn">{emptyText ?? '无引用（该判断未指向任何真实评论）'}</span>;
   return (
     <div className="row wrap" style={{ gap: 4 }}>
       {refs.map((r) => (
@@ -148,6 +150,26 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
   const [showRaw, setShowRaw] = useState(false);
   const [showLegacy, setShowLegacy] = useState(false);
 
+  // ── V3.2.1 · P0-2：最后一道防线 —— 顶层数组字段全部 `?? []` 兜底 ──
+  // 正常路径下 result 已在 CommentPage.loadStoredReport 经 validateAIResult 三态分类（current 才进来）；
+  // 这里防御的是「漏掉验证的调用方」与「未来数据演进时的脏记录」。
+  // ⚠️ 这是兜底，**不是** schema validation 的替代品 —— 绝不因本层存在而撤掉入口校验。
+  // Partial 化是诚实的类型表达：承认运行时字段可能缺失，编译器强制每处访问都走兜底。
+  const r = result as Partial<CommentAIResult>;
+  const narratives = r.narratives ?? [];
+  const claims = r.claims ?? [];
+  const relevantFacts = r.relevantFacts ?? [];
+  const tensions = r.tensions ?? [];
+  const audienceSegments = r.audienceSegments ?? [];
+  const mechanisms = r.mechanisms ?? [];
+  const signalVsNoise = r.signalVsNoise ?? [];
+  const contentImplications = r.contentImplications ?? [];
+  const hypothesesToTest = r.hypothesesToTest ?? [];
+  const needs = r.needs ?? [];
+  const questions = r.questions ?? [];
+  const uncertainty = r.uncertainty ?? [];
+  const nextResearch = r.nextResearch ?? [];
+
   // V3.1.x 遗留分类字段（旧记录运行时可能存在；新记录 schema 已移除）—— 防御性读取
   const legacy = result as unknown as {
     facts?: string[];
@@ -171,9 +193,9 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
   }
 
   // 评论区结构分组（展示顺序：主叙事 → 反叙事 → 次叙事）
-  const primaryNarratives = result.narratives.filter((n) => n.role === 'primary');
-  const counterNarratives = result.narratives.filter((n) => n.role === 'counter');
-  const secondaryNarratives = result.narratives.filter((n) => n.role === 'secondary');
+  const primaryNarratives = narratives.filter((n) => n.role === 'primary');
+  const counterNarratives = narratives.filter((n) => n.role === 'counter');
+  const secondaryNarratives = narratives.filter((n) => n.role === 'secondary');
 
   // 可验证性提示：只在真的有问题时出现，避免噪声
   const integrityWarnings: string[] = [];
@@ -218,10 +240,10 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
         ) : (
           <Empty>模型未给出核心判断</Empty>
         )}
-        {result.claims.length > 0 && (
+        {claims.length > 0 && (
           <div className="stack" style={{ gap: 8 }}>
             <div className="faint">关键判断（带置信度）</div>
-            {result.claims.map((c, i) => (
+            {claims.map((c, i) => (
               <div key={i} className="stack" style={{ gap: 4 }}>
                 <div className="row wrap" style={{ gap: 6, alignItems: 'baseline' }}>
                   <span>{c.statement}</span>
@@ -232,17 +254,17 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
             ))}
           </div>
         )}
-        {result.relevantFacts.length > 0 && (
+        {relevantFacts.length > 0 && (
           <div className="stack" style={{ gap: 4 }}>
             <div className="faint">相关事实（仅保留支撑判断的输入事实，不复述统计区）</div>
-            <Bullets items={result.relevantFacts} empty="无" />
+            <Bullets items={relevantFacts} empty="无" />
           </div>
         )}
       </Section>
 
       {/* 2 评论区结构（主 / 反 / 次叙事） */}
       <Section index={2} title="评论区结构" hint={`主 ${primaryNarratives.length} · 反 ${counterNarratives.length} · 次 ${secondaryNarratives.length}`}>
-        {result.narratives.length === 0 ? (
+        {narratives.length === 0 ? (
           <Empty>样本不足以重建叙事结构（模型未强行编造）</Empty>
         ) : (
           <div className="stack" style={{ gap: 10 }}>
@@ -276,11 +298,11 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
 
       {/* 3 核心矛盾 */}
       <Section index={3} title="核心矛盾" hint="观点间真正的冲突结构">
-        {result.tensions.length === 0 ? (
+        {tensions.length === 0 ? (
           <Empty>未识别出值得呈现的核心矛盾</Empty>
         ) : (
           <div className="stack" style={{ gap: 10 }}>
-            {result.tensions.map((t, i) => (
+            {tensions.map((t, i) => (
               <div key={i} className="stack" style={{ gap: 4 }}>
                 <div style={{ fontWeight: 500 }}>{t.statement}</div>
                 <div className="row wrap" style={{ gap: 8 }}>
@@ -301,12 +323,12 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
       </Section>
 
       {/* 4 用户群体 */}
-      <Section index={4} title="用户群体" hint={`${result.audienceSegments.length} 个`}>
-        {result.audienceSegments.length === 0 ? (
+      <Section index={4} title="用户群体" hint={`${audienceSegments.length} 个`}>
+        {audienceSegments.length === 0 ? (
           <Empty>当前样本无法可靠区分用户群体</Empty>
         ) : (
           <div className="stack" style={{ gap: 10 }}>
-            {result.audienceSegments.map((s, i) => (
+            {audienceSegments.map((s, i) => (
               <div key={i} className="stack" style={{ gap: 4 }}>
                 <strong>{s.name}</strong>
                 <div>
@@ -326,11 +348,11 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
 
       {/* 5 为什么会产生这种讨论（可能机制） */}
       <Section index={5} title="为什么会产生这种讨论" hint="可能机制，非确定因果">
-        {result.mechanisms.length === 0 ? (
+        {mechanisms.length === 0 ? (
           <Empty>证据不足以提出机制假设（模型未强行编造）</Empty>
         ) : (
           <div className="stack" style={{ gap: 10 }}>
-            {result.mechanisms.map((m, i) => (
+            {mechanisms.map((m, i) => (
               <div key={i} className="stack" style={{ gap: 4 }}>
                 <div className="row wrap" style={{ gap: 6, alignItems: 'baseline' }}>
                   <span style={{ fontWeight: 500 }}>{m.hypothesis}</span>
@@ -346,11 +368,11 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
 
       {/* 6 信号 / 噪声 */}
       <Section index={6} title="信号 / 噪声" hint="信号 = 提供新事实或逻辑；噪声 = 纯情绪表态">
-        {result.signalVsNoise.length === 0 ? (
+        {signalVsNoise.length === 0 ? (
           <Empty>未做信号 / 噪声区分</Empty>
         ) : (
           <div className="stack" style={{ gap: 10 }}>
-            {result.signalVsNoise.map((s, i) => (
+            {signalVsNoise.map((s, i) => (
               <div key={i} className="stack" style={{ gap: 4 }}>
                 <div className="row wrap" style={{ gap: 6, alignItems: 'baseline' }}>
                   <span className={`tag ${s.type === 'signal' ? 'ok' : ''}`} style={{ fontSize: 11 }}>
@@ -368,11 +390,11 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
 
       {/* 7 对内容研究意味着什么 */}
       <Section index={7} title="对内容研究意味着什么">
-        {result.contentImplications.length === 0 ? (
+        {contentImplications.length === 0 ? (
           <Empty>证据不足以给出内容层面的含义判断</Empty>
         ) : (
           <div className="stack" style={{ gap: 10 }}>
-            {result.contentImplications.map((c, i) => (
+            {contentImplications.map((c, i) => (
               <div key={i} className="stack" style={{ gap: 4 }}>
                 <div style={{ fontWeight: 500 }}>{c.insight}</div>
                 <div>
@@ -388,27 +410,32 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
 
       {/* 8 可验证假设 */}
       <Section index={8} title="可验证假设" hint="假设 → 证据 → 反证 → 验证">
-        {result.hypothesesToTest.length === 0 ? (
+        {hypothesesToTest.length === 0 ? (
           <Empty>当前样本没有产生值得验证的假设</Empty>
         ) : (
           <div className="stack" style={{ gap: 12 }}>
-            {result.hypothesesToTest.map((h, i) => (
+            {hypothesesToTest.map((h, i) => {
+              // V3.2.1 · P0-2：嵌套数组字段同样兜底（脏数据的元素可能缺 refs / missingEvidence）
+              const evidenceFor = h.evidenceForRefs ?? [];
+              const evidenceAgainst = h.evidenceAgainstRefs ?? [];
+              const missingEvidence = h.missingEvidence ?? [];
+              return (
               <div key={i} className="stack" style={{ gap: 4 }}>
                 <div style={{ fontWeight: 500 }}>{h.hypothesis}</div>
                 <div className="row wrap" style={{ gap: 12 }}>
                   <span>
                     <span className="faint ok" style={{ marginRight: 4 }}>支持</span>
-                    {h.evidenceForRefs.length ? h.evidenceForRefs.join(' ') : '—'}
+                    {evidenceFor.length ? evidenceFor.join(' ') : '—'}
                   </span>
                   <span>
                     <span className="faint warn" style={{ marginRight: 4 }}>反证</span>
-                    {h.evidenceAgainstRefs.length ? h.evidenceAgainstRefs.join(' ') : '—'}
+                    {evidenceAgainst.length ? evidenceAgainst.join(' ') : '—'}
                   </span>
                 </div>
-                {h.missingEvidence.length > 0 && (
+                {missingEvidence.length > 0 && (
                   <div>
                     <span className="faint" style={{ marginRight: 6 }}>目前缺失</span>
-                    {h.missingEvidence.join('；')}
+                    {missingEvidence.join('；')}
                   </div>
                 )}
                 <div>
@@ -416,32 +443,33 @@ export function CommentAIReport(props: CommentAIReportProps): ReactNode {
                   {h.testMethod}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Section>
 
       {/* 9 用户需求 */}
       <Section index={9} title="用户需求">
-        <Bullets items={result.needs} empty="未识别出明确需求" />
-        {result.questions.length > 0 && (
+        <Bullets items={needs} empty="未识别出明确需求" />
+        {questions.length > 0 && (
           <>
             <div className="faint" style={{ marginTop: 8 }}>
               高频问题
             </div>
-            <Bullets items={result.questions} empty="无" />
+            <Bullets items={questions} empty="无" />
           </>
         )}
       </Section>
 
       {/* 10 不确定性 */}
       <Section index={10} title="不确定性" hint="请先读这一段" tone="warn">
-        <Bullets items={result.uncertainty} empty="模型未说明不确定性（这本身是风险信号）" />
+        <Bullets items={uncertainty} empty="模型未说明不确定性（这本身是风险信号）" />
       </Section>
 
       {/* 11 下一步研究 */}
       <Section index={11} title="下一步要采集的数据">
-        <Bullets items={result.nextResearch} empty="无建议" />
+        <Bullets items={nextResearch} empty="无建议" />
       </Section>
 
       {/* 12 原始分析（V3.1.x 遗留分类字段，仅旧记录可见） */}

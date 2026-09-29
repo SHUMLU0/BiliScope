@@ -156,7 +156,17 @@ AI 分析走统一编排：**Provider → 请求 → 结构化输出 → Zod 校
 - 详见 `ai-history.html`（「AI 历史」）——可按类型筛选、展开查看每次请求的原始 prompt 与响应。
 
 ## 十一、版本
-当前：**v3.2.0**（**V3.2.0 —— Comment Research Analyst 评论研究分析师**。核心：
+当前：**v3.2.1**（**V3.2.1 —— Comment Research Runtime Safety + Dashboard Route Fix 运行时安全维护版**。核心：
+① **白屏根因修复**——`loadStoredReport` 不再盲 cast，接入 `validateAIResult` + `detectCommentAnalysisVersion`
+运行时三态验证：V3.2 合法 → 正常渲染；V3.1.x 旧 schema → 「该分析来自旧版本，当前报告结构已经升级。」+「重新分析」；
+损坏数据 → 「该历史 AI 结果已损坏，无法展示。」——绝不 throw、绝不假装成功、绝不强转迁移；
+② **CommentAIReport 数组防御**——全部顶层数组字段与嵌套 refs `?? []` 兜底（最后一道防线，不替代 schema validation）；
+③ **研究台链接修复**——`CommentAnalysis.videoId`（本地 id）经 `Video.id → Video` 映射换算成真实 bvid 再生成 href，
+缺失显示「视频记录缺失」，绝不生成错误链接；
+④ **`parseBvid()` 统一入口**——裸 BV 号 / 完整链接 / `?p=` 分 P / spm 参数一律提取 canonical BV 号；
+⑤ **ErrorBoundary**——报告区渲染异常显示错误摘要与重试，绝不白屏、不掩盖 schema bug；
+⑥ 新增测试 WHITE-SCREEN-001..008 + DASHBOARD-001..003 + parseBvid/三态判定单测。
+承接 **V3.2.0 —— Comment Research Analyst 评论研究分析师**（核心：
 ① **研究契约重写**——评论 schema 从「分类整理」升级为「研究判断」：narratives（主/次/反叙事 ≤6）、
 audienceSegments（用户分群 ≤5）、tensions（核心矛盾+双方立场 ≤5）、mechanisms（可能机制+confidence ≤5）、
 signalVsNoise（信号/噪声+reason 必填 ≤8）、contentImplications（内容研究含义 ≤5）、
@@ -169,7 +179,7 @@ claims（可核查论断+confidence ≤8）、hypothesesToTest（假设→支持
 ④ **AI-META 修复**——`CommentAnalysis.auditId` 关联审计行，刷新后恢复真实
 model / durationMs / requestCount / repaired / 引用审计（旧记录如实显示占位值，绝不编造）；
 ⑤ **防幽灵成功升级**——七个研究判断字段至少一个非空，纯事实复述被 Zod 拒绝；
-⑥ 新增测试 AI-RESEARCH-001..009 + AI-META-001..003。
+⑥ 新增测试 AI-RESEARCH-001..009 + AI-META-001..003）。
 承接 V3.1.1 Probe 旁路诊断 + AI 暂停恢复 → V3.1.0 Research Workspace（AI 隐私化 + 工作台 UI）→
 V3.0.2 AI 开放测试模式 → V3.0.1 稳定性/性能/UI/文档维护版 → V3.0.0 可验证 AI 分析系统 →
 V0.2.2 裸 BV 评论采集依赖闭环修复 → V0.2.1 评论采集真实性修复（`REAL_API_PASS`） →

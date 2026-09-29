@@ -1,7 +1,25 @@
-# BiliScope V3.2.0 进度表
+# BiliScope V3.2.1 进度表
 
 > 唯一进度表（Single Source of Truth）。
 > 状态：✅ 完成 / 🔄 进行中 / ⏸ 阻塞 / ⬜ 未开始
+
+---
+
+## V3.2.1 「Comment Research Runtime Safety + Dashboard Route Fix」
+
+> 定位：维护版 —— 任何输入（无参数 / 旧数据 / 损坏数据 / 完整视频链接）都不再白屏，
+> 研究台链接指向真实视频。不改研究契约、不做假迁移、不删历史数据与审计。
+
+| 编号 | 范围 | 状态 | 备注 |
+|---|---|---|---|
+| **S-1** | 白屏根因修复（loadStoredReport 三态） | ✅ | 盲 cast → `validateAIResult('comment', ...)` + `detectCommentAnalysisVersion()`（`src/ai/compat.ts` 正式化：current/legacy/invalid，基于 schema safeParse + legacy 特征字段，不用 try/catch 猜）；StoredReport 增加 `resultVersion`；UI 三态降级卡（旧版本 → 「重新分析」/ 损坏 → 「已损坏」），绝不 throw / 绝不假装成功 / 绝不强转迁移 |
+| **S-2** | CommentAIReport 数组防御 | ✅ | 顶层数组字段 Partial 化 + `?? []`（narratives/claims/relevantFacts/tensions/audienceSegments/mechanisms/signalVsNoise/contentImplications/hypothesesToTest/needs/questions/uncertainty/nextResearch）；RefsRow `refs?` 兜底覆盖 8 个调用点；hypotheses 嵌套 refs/missingEvidence 兜底——最后一道防线，不替代 schema validation |
+| **S-3** | Dashboard 链接修复 | ✅ | `RecentLists.videoById: Map<Video.id, Video>`（Promise.all 并行 toArray）；href 用真实 `video.bvid`；缺失显示「视频记录缺失」不生成错误 href |
+| **S-4** | parseBvid 统一入口 | ✅ | `src/utils/bvid.ts`：裸 BV / 完整链接 / `?p=` / spm → canonical BV 号；CommentPage URL 参数与 handleFetch 采集输入统一走该入口 |
+| **S-5** | ErrorBoundary | ✅ | `src/ui/components/ErrorBoundary.tsx` 最小实现（错误摘要 + 重试），包裹报告区——最后保险，不掩盖 schema bug |
+| **T-4** | WHITE-SCREEN-001..008 + DASHBOARD-001..003 | ✅ | jsdom 真实 React 渲染测试（@testing-library/react + fake-indexeddb）：无 bvid / 无 Video / 无分析 / legacy 不 throw / malformed 不 throw / V3.2 正常 / 刷新恢复 / 切换 BV 不残留；id→bvid 映射 / 缺失不生成 href / parseBvid 跨页闭环；另有 parseBvid/三态判定单测 9 项 |
+| **D** | 文档同步 | ✅ | 六处对齐 `3.2.1`；README 局部更新（当前版本 / 版本历程 V3.2.1 行 / 旧数据兼容行为）；CHANGELOG 新段（5 条 Fixed）；DEPLOYMENT 版本段前置；docs-consistency 升级 3.2.1 契约（保留 V3.2.0 及更早历史断言） |
+| **G** | 门禁链 | ✅ | typecheck（canary 正控）/ lint 官方 glob / test 全量 / build / test:dist / scan-secrets / verify-acceptance → commit → push → CI → audit ZIP（见最终报告块） |
 
 ---
 

@@ -1,8 +1,54 @@
-# FINAL_AUDIT.md — BiliScope V3.2.0 最终审计
+# FINAL_AUDIT.md — BiliScope V3.2.1 最终审计
 
-> 生成于 2026-09-29 · 当前版本 **V3.2.0**（Comment Research Analyst 评论研究分析师）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
+> 生成于 2026-09-29 · 当前版本 **V3.2.1**（Comment Research Runtime Safety + Dashboard Route Fix）· **本地全门禁通过** · GitHub: https://github.com/SHUMLU0/BiliScope
 >
-> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → V3.0.1 稳定性 / 性能 / UI / 文档维护版 → V3.0.2 AI 开放测试模式 → V3.1.0 Research Workspace → V3.1.1 Probe 旁路诊断 + AI 暂停恢复 → **V3.2.0 Comment Research Analyst**
+> 承接：V0.1.1 数据链路修复 → V0.1.2 真实链路最小修复 → V0.1.3 归一化字段映射修复 → V0.1.4 数据迁移修复 → V0.2.0 研究能力升级 → V0.2.1 评论采集真实性修复 → V0.2.2 裸 BV 评论采集依赖闭环修复 → V3.0.0 可验证 AI 分析系统 → V3.0.1 稳定性 / 性能 / UI / 文档维护版 → V3.0.2 AI 开放测试模式 → V3.1.0 Research Workspace → V3.1.1 Probe 旁路诊断 + AI 暂停恢复 → V3.2.0 Comment Research Analyst → **V3.2.1 Comment Research Runtime Safety**
+
+---
+
+## 0x-2. V3.2.1 Comment Research Runtime Safety + Dashboard Route Fix
+
+> 定位：**维护版 —— 任何输入都不白屏，研究台链接指向真实视频。**
+> **不改**：研究契约（schemas.ts 14 字段与上限）/ AI 架构 / 采集层 / CommentCollector / WBI /
+> Video bootstrap / 匿名引用核心逻辑 / 探针语义 / 暂停语义 / 指纹冻结；
+> **不做**假迁移（旧数据绝不强转新 schema）；**不删**历史数据与历史审计。
+
+### 交付项
+
+| # | 交付 | 实现 | 测试 |
+|---|---|---|---|
+| 1 | 白屏根因修复（`loadStoredReport` 三态验证） | 盲 cast `as CommentAIResult` → `validateAIResult('comment', raw)` + `detectCommentAnalysisVersion()`（新 `src/ai/compat.ts`：safeParse 通过 = current；含 legacy 特征字段（facts/themes/support/opposition/findings 数组形态）= legacy；其余 = invalid；不用 try/catch 猜）。`StoredReport` 增加 `resultVersion: 'current'\|'legacy'\|'invalid'\|'none'`；UI 三态降级卡：legacy → 「该分析来自旧版本，当前报告结构已经升级。」+「重新分析」；invalid → 「该历史 AI 结果已损坏，无法展示。」；none → 沿用「未保存结构化产品结果」。绝不 throw、绝不白屏、绝不假装成功 | `WHITE-SCREEN-004/005/006` |
+| 2 | CommentAIReport 数组防御（最后一道防线） | 顶层数组字段 Partial 化 + `?? []`（narratives / claims / relevantFacts / tensions / audienceSegments / mechanisms / signalVsNoise / contentImplications / hypothesesToTest / needs / questions / uncertainty / nextResearch）；`RefsRow` 的 `refs` 参数 optional 化兜底 8 个调用点；hypotheses 嵌套 evidenceForRefs / evidenceAgainstRefs / missingEvidence 兜底。**不替代 schema validation** | `WHITE-SCREEN-004/005`（漏验证场景） |
+| 3 | Dashboard 链接修复（`dashboard-page.tsx`） | `CommentAnalysis.videoId` 是本地 Dexie `Video.id` ≠ bvid——曾直接当 bvid 拼 `comment.html?bvid=` 链接（点了必错）。现在 `loadKpis` 的 `Promise.all` 并行取 `db.videos.toArray()` 建 `Map<Video.id, Video>`；href 用真实 `video.bvid`；Video 缺失显示「视频记录缺失」纯文本，绝不生成错误 href | `DASHBOARD-001/002` |
+| 4 | `parseBvid()` 统一入口（`src/utils/bvid.ts`） | 裸 BV 号 / 完整视频链接 / `?p=` 分 P / `spm` 参数 → canonical BV 号（lookaround 防从更长 token 截错）；CommentPage URL 参数与 `handleFetch` 采集输入统一走该入口 | `DASHBOARD-003` + bvid 单测 |
+| 5 | ErrorBoundary（最后保险） | 新 `src/ui/components/ErrorBoundary.tsx` 最小 class 组件（错误摘要原文 + 重试按钮），包裹报告区——渲染异常绝不白屏；错误原文展示，不掩盖 schema bug | 架构防线（jsdom 渲染测试锁定主路径） |
+
+### 关键不变量（V3.2.1 后成立）
+
+- V3.2.0 全部不变量继续成立（研究契约 14 字段 / 防幽灵成功三防线 / `forEachResultRefs` 唯一遍历口径 / `auditId` 元数据恢复 / 报告段落顺序与 `AI 分析结果` 锚点）。
+- **三态判定唯一入口**：`detectCommentAnalysisVersion`（current / legacy / invalid）+ 调用方对 `undefined` 的 none 分流；legacy 绝不强转、损坏绝不渲染。
+- **`CommentAnalysis.videoId` 语义**：是本地 `Video.id`；任何要生成 `comment.html?bvid=` 链接的地方必须经 `Video.id → Video` 映射换算。
+- **BV 号解析唯一入口**：`parseBvid`；禁止散落正则。
+- 版本号六处对齐 `3.2.1`。
+
+### 门禁实测结果（本地，2026-09-29）
+
+| 门禁 | 命令 | 结果 |
+|---|---|---|
+| typecheck | `tsc --noEmit` | **PASS**（正控验证：CANARY_EXIT=2 → REAL_EXIT=0，日志 0 字节） |
+| lint | `eslint "src/**/*.{ts,tsx}" "tests/**/*.{ts,tsx}"` | **PASS**（EXIT=0） |
+| test | `vitest run` | **PASS** 454 passed / 2 skipped / 0 failed（44 文件，较 V3.2.0 基线 434/2 +20 测试 +3 文件：`white-screen.test.tsx` 8 项 / `dashboard-route.test.tsx` 3 项 / `bvid.test.ts` 9 项） |
+| build | `vite build` | **PASS**（EXIT=0，dist manifest=3.2.1） |
+| test:dist | `node scripts/test-dist.mjs` | **PASS**（EXIT=0，严格模式 3 passed） |
+| scan-secrets | `node scripts/scan-secrets.mjs` | **PASS**（EXIT=0，0 泄漏） |
+| verify-acceptance | `tsx scripts/verify-acceptance.ts` | **PASS**（TEST 001–009 全过；TEST 010/011 按设计 commit/push 后执行） |
+| WHITE-SCREEN | `tests/ui/white-screen.test.tsx` | **PASS** 8/8（jsdom 真实 React 渲染：七种启动异常/数据态全不白屏） |
+| DASHBOARD | `tests/ui/dashboard-route.test.tsx` | **PASS** 3/3（id→bvid 映射 / 缺失不生成 href / parseBvid 跨页闭环） |
+
+### 真实性边界（本审计不粉饰）
+
+- 真实 Provider 端到端未在本轮执行 → **REAL AI ENVIRONMENT LIMITED**（沿用 V3.2.0 结论；本轮未改 AI 请求链路）。
+- Chrome E2E 沿用既有结论：本机命令行不加载未打包扩展 → `CHROME_E2E_ENV_LIMITED`（≠ FAIL）；本轮页面级安全性由 jsdom 真实 React 渲染测试（WHITE-SCREEN-001..008 / DASHBOARD-001..003）锁定，**不冒充 Chrome E2E**。
 
 ---
 
